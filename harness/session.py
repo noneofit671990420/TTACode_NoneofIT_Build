@@ -19,6 +19,7 @@ from .models.loader import ModelLoadError, load_model
 from .skills.loader import discover_skills
 from .tools import ToolRegistry, ToolContext, load_plugins
 from .tools.builtin import register_all
+from .transports.ollama import unload_model
 
 
 class SessionError(Exception):
@@ -133,7 +134,14 @@ def build_session(
 
 
 def close_session(session: Session) -> None:
-    """Release session resources (MCP bridge)."""
+    """Release session resources (MCP bridge) and unload the model from
+    the server so it doesn't sit warm eating VRAM after a model switch.
+    Best-effort throughout — closing must never raise."""
+    try:
+        transport = session.loop.transport
+        unload_model(transport.url, transport.model)
+    except Exception:
+        pass
     try:
         session.loop.close()
     except Exception:

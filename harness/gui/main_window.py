@@ -33,8 +33,18 @@ from harness.cli import load_config, save_config
 from harness.gui import images as image_helpers
 from harness.gui import markdown, theme
 from harness.gui.models import find_vision_model, list_gui_models
-from harness.gui.worker import ChatWorker, PullWorker, SetupWorker
-from harness.models import DEFAULT_VISION_MODEL, is_vision_model
+from harness.gui.specs import analyze_machine, recommend_models, spec_card_html
+from harness.gui.worker import (
+    ChatWorker,
+    PullWorker,
+    SetupWorker,
+    auto_cleanup,
+)
+from harness.models import (
+    DEFAULT_VISION_MODEL,
+    is_vision_model,
+    vision_supports_tools,
+)
 
 
 class ChatView(QTextBrowser):
@@ -79,6 +89,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._img_ids = itertools.count(1)
         self._pulling = False
+        self._pull_model: str | None = None
 
         self._build_ui()
         self._thinking_timer = QTimer(self)
@@ -183,13 +194,13 @@ class MainWindow(QMainWindow):
 
     def _start_setup(self, model: str | None = None, project: str | None = None) -> None:
         self._set_busy(True, "Looking for models…")
-        self._setup_worker = SetupWorker(
+        self._setup_worker = auto_cleanup(SetupWorker(
             model=model,
             project=project,
             config=self._config,
             old_session=self._session,
             parent=self,
-        )
+        ))
         self._setup_worker.progress.connect(self._status_label.setText)
         self._setup_worker.done.connect(self._on_setup_done)
         self._setup_worker.failed.connect(self._on_setup_failed)
@@ -203,6 +214,7 @@ class MainWindow(QMainWindow):
         self._set_busy(False, f"Ready — {session.loaded.name}")
         if first:
             self._welcome()
+            self._show_spec_card(session.loaded.name)
         if self._pending_send is not None:
             text, paths = self._pending_send
             self._pending_send = None
@@ -227,6 +239,27 @@ class MainWindow(QMainWindow):
             "<p>Drop an image anytime to use vision.</p>"
             "</div></div>"
         )
+
+    def _show_spec_card(self, current_model: str) -> None:
+        """One-time launch card: machine specs + best-model recommendations.
+
+        Best-effort and fast; never blocks the UI and never raises — a
+        missing reading just means a shorter card.
+        """
+        try:
+            spec = analyze_machine()
+            recs = recommend_models(spec)
+            entries = list_gui_models()
+            installed = {e["name"] for e in entries}
+            fits = next(
+                (e["fits_vram"] for e in entries if e["name"] == current_model),
+                None,
+            )
+            self._chat.append_html(
+                spec_card_html(spec, recs, installed, current_model, fits)
+            )
+        except Exception:
+            pass
 
     # -- models ------------------------------------------------------------
     def _refresh_models(self, current: str) -> None:
@@ -293,10 +326,18 @@ class MainWindow(QMainWindow):
         self._pending_send = (text, paths)
         model = self._config.get("vision_model") or DEFAULT_VISION_MODEL
         self._chat.append_html(
+            self._vision_install_card_html(
+                model,
+                "This model can't see images. Install a vision model — "
+                "one click, then I'll send your message automatically:",
+            )
+        )
+
+    def _vision_install_card_html(self, model: str, intro: str) -> str:
+        """One-click vision-model install card (no terminal needed)."""
+        return (
             '<div class="msg notice"><div class="who">TTACODE</div>'
-            f"<p>This model can't see images. Install a vision model "
-            f"(<code>{model}</code>) — one click, then I'll send your "
-            f"message automatically:</p>"
+            f"<p>{intro}</p>"
             f'<p><a href="ttacode://install-vision">'
             f"⬇ Install {model}</a></p>"
             f"<p>Prefer the terminal? <code>ollama pull {model}</code></p>"
@@ -329,9 +370,9 @@ class MainWindow(QMainWindow):
         self._set_busy(True)
         self._thinking_dots = 0
         self._thinking_timer.start()
-        self._chat_worker = ChatWorker(
+        self._chat_worker = auto_cleanup(ChatWorker(
             self._session, text, [b64 for _cid, b64 in cid_images], parent=self
-        )
+        ))
         self._chat_worker.done.connect(self._on_turn_done)
         self._chat_worker.start()
 
@@ -357,12 +398,23 @@ class MainWindow(QMainWindow):
                 f"{markdown.render(shown + extra)}</div>"
             )
         if result.get("tools_unavailable"):
-            self._chat.append_html(
-                '<div class="tools">This model can\'t use tools, so I answered '
-                "without them (images still work). For full agentic use, "
-                "switch to a vision model that supports tools, e.g. "
-                "qwen2.5vl:7b.</div>"
-            )
+            vision = find_vision_model()
+            if vision is not None and vision_supports_tools(vision["name"]):
+                self._chat.append_html(
+                    '<div class="tools">This model can\'t use tools, so I answered '
+                    f"without them (images still work). For full agentic use, "
+                    f"pick <code>{vision['name']}</code> from the model menu.</div>"
+                )
+            else:
+                # No tool-capable vision model installed: offer the download.
+                model = self._config.get("vision_model") or DEFAULT_VISION_MODEL
+                self._chat.append_html(
+                    self._vision_install_card_html(
+                        model,
+                        "This model can't use tools, so I answered without "
+                        "them. Install a vision model that can — one click:",
+                    )
+                )
         self._set_busy(False, f"Ready — {self._session.loaded.name}")
 
     # -- attachments --------------------------------------------------------
@@ -453,17 +505,22 @@ class MainWindow(QMainWindow):
             self._start_setup()
         elif action == "install-vision":
             self._start_pull()
+        elif action == "install-model":
+            name = url.path().lstrip("/")
+            if name:
+                self._start_pull(name)
 
-    def _start_pull(self) -> None:
+    def _start_pull(self, model: str | None = None) -> None:
         if self._pulling:
             return
-        model = self._config.get("vision_model") or DEFAULT_VISION_MODEL
+        model = model or self._config.get("vision_model") or DEFAULT_VISION_MODEL
+        self._pull_model = model
         self._pulling = True
         self._set_busy(True, f"Installing {model}…")
         self._progress.setVisible(True)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self._pull_worker = PullWorker(model, parent=self)
+        self._pull_worker = auto_cleanup(PullWorker(model, parent=self))
         self._pull_worker.progress.connect(self._on_pull_progress)
         self._pull_worker.done.connect(self._on_pull_done)
         self._pull_worker.start()
@@ -485,9 +542,11 @@ class MainWindow(QMainWindow):
             return
         self._chat.append_html(
             f'<div class="tools">{markdown.render(message)} '
-            "Switching to it for vision…</div>"
+            "Switching to it…</div>"
         )
-        self._config["default_model"] = self._config.get("vision_model") or DEFAULT_VISION_MODEL
+        self._config["default_model"] = self._pull_model or self._config.get(
+            "vision_model"
+        ) or DEFAULT_VISION_MODEL
         save_config(self._config)
         # Refresh the model list (the new model now exists), then switch.
         self._start_setup(model=self._config["default_model"])

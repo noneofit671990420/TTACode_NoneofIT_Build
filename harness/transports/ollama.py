@@ -22,6 +22,28 @@ def is_reachable(url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def unload_model(url: str, model: str, timeout: float = 30.0) -> bool:
+    """Ask Ollama to drop ``model`` from VRAM/RAM immediately.
+
+    POSTs ``/api/generate`` with ``keep_alive: 0`` — Ollama's documented
+    unload. Best-effort: returns False (never raises) when the server is
+    unreachable or refuses. Used when switching models so the old one
+    doesn't sit warm for 30 minutes eating VRAM on small cards.
+    """
+    try:
+        body = json.dumps({"model": model, "keep_alive": 0}).encode()
+        request = urllib.request.Request(
+            url.rstrip("/") + "/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read()
+        return True
+    except Exception:
+        return False
+
+
 def chat(
     url: str,
     model: str,

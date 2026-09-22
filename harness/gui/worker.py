@@ -13,6 +13,18 @@ import subprocess
 from PySide6.QtCore import QThread, Signal
 
 
+def auto_cleanup(worker: QThread) -> QThread:
+    """Schedule a finished worker for deletion.
+
+    Workers are parented to the main window, so without this every chat
+    turn / setup / pull leaks a finished QThread as a permanent child —
+    the session gets slower the longer it runs. Returns the worker for
+    chaining.
+    """
+    worker.finished.connect(worker.deleteLater)
+    return worker
+
+
 class SetupWorker(QThread):
     """Build (or rebuild) the agent session off the GUI thread."""
 
