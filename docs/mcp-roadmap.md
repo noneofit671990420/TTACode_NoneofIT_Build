@@ -1,65 +1,91 @@
-# MCP roadmap
+# MCP roadmap — status
 
-The `harness/mcp` package currently only loads server configuration
-(`MCPServerConfig`, `load_servers`). This document describes the planned
-JSON-RPC implementation. Nothing here is faked: `MCPClient.connect()`
-raises `NotImplementedError` until the work below lands.
+`harness/mcp` is now a **real JSON-RPC 2.0 client** (`client.py`), not a
+skeleton. This document records what shipped and what's deferred.
+Setup instructions live in `docs/mcp.md`.
 
-## Planned transports
+## Shipped
 
-### stdio
+### stdio transport (`StdioTransport`)
 
-- Spawn `config.command + config.args` with `subprocess.Popen`,
-  pipes for stdin/stdout, `config.env` merged over the parent environment.
-- Frame JSON-RPC 2.0 messages with `Content-Length` headers (LSP-style),
-  matching the MCP stdio convention.
-- Request ids: incrementing integers, guarded by a lock for threaded use.
-- Shutdown: send `shutdown` notification, then SIGTERM with a timeout,
-  then SIGKILL. Never leave orphan processes.
+- Spawns `config.command + config.args` with `subprocess.Popen`,
+  pipes for stdin/stdout/stderr, `config.env` merged over the parent
+  environment.
+- Frames JSON-RPC 2.0 messages with `Content-Length` headers (the MCP
+  stdio convention); defensively also accepts bare single-line JSON.
+- Request ids are incrementing integers under a lock; a reader thread
+  matches responses by id and `request()` blocks with a configurable
+  timeout (default 30 s) — a hung server raises `MCPError`, never hangs.
+- Stderr is drained on its own thread (last 20 lines kept) so a chatty
+  server can't block the pipes; instant-exit failures report the exit
+  code plus stderr tail.
+- Shutdown: SIGTERM with a 2 s grace, then SIGKILL; pipes closed. No
+  orphan processes (reader threads are daemons).
 
-### SSE
+### HTTP transports
 
-- `GET {url}` with `Accept: text/event-stream` using stdlib
-  `urllib`/`http.client`; parse `event:` / `data:` frames.
-- The `endpoint` event gives the message POST URL; JSON-RPC requests go
-  there, responses arrive as `message` events correlated by id.
-- Reconnect with backoff on dropped streams.
+- **Streamable HTTP** (`StreamableHttpTransport`, the current spec):
+  POST JSON-RPC with `Accept: application/json, text/event-stream`;
+  handles plain-JSON responses and SSE (`text/event-stream`) responses
+  (parses `data:` lines, correlates by id).
+- **Legacy SSE** (`LegacySseTransport`, best-effort for pre-2025
+  servers): GETs the event stream, waits for the `endpoint` event,
+  POSTs requests there, correlates responses arriving on the stream.
+  `MCPClient` tries streamable HTTP first and falls back to legacy SSE
+  on HTTP 404/405.
 
-## Planned protocol flow
+### Protocol flow (`MCPClient`)
 
-1. `initialize` with `protocolVersion` negotiation and client capabilities.
-2. `notifications/initialized`.
-3. `tools/list` → adapt each MCP tool into the harness `ToolRegistry`
-   shape (`name`, `description`, JSON schema).
-4. `tools/call` → route through `MCPClient.call_tool`, returning the
-   MCP result content blocks as a JSON-serializable dict.
-5. Optional later: `resources/list`, `prompts/list` surfaced as skills.
+1. `initialize` offering protocolVersion `2025-06-18`, with client
+   capabilities + clientInfo — the server's negotiated version is
+   accepted whatever it is (older or newer).
+2. `notifications/initialized` (best-effort).
+3. `tools/list` → normalized `{name, description, schema}` (schema =
+   the server's `inputSchema`).
+4. `tools/call` → text content blocks concatenated; image/audio and
+   embedded resources become honest `[omitted]` placeholders;
+   `isError` results raise `MCPError`.
+5. Malformed JSON, JSON-RPC error responses, timeouts, dead processes →
+   `MCPError` with a clear message, everywhere.
+
+### Bridge (`bridge.py`)
+
+- `mount_mcp_tools(registry, ctx)` reads `~/.ttacode/mcp.json`,
+  connects each server, registers tools as `mcp__<server>__<tool>`
+  (sanitized to registry name rules) with `[mcp:<server>]` description
+  prefix. Dead/unreachable servers warn on stderr and are skipped —
+  startup and the agent loop never break.
+- Wired into `AgentLoop` (optional `mcp_bridge`, `close()`) and the
+  `run --headless` CLI (with a `finally` close and tool-count summary).
+- CLI: `harness mcp list` (live per-server status + tool names),
+  `harness mcp check` (OK/FAIL per server, non-zero exit on failure).
+
+### Security notes (as before, still true)
+
+- Stdio servers run with the user's own permissions — same trust model
+  as the built-in shell tools.
+- `url` entries must be http(s); no credentials are stored in the
+  config (export tokens in your shell; `env` merges over `os.environ`).
+- Tool results from MCP servers are untrusted data: quoted into
+  prompts, never executed.
+
+## Deferred
+
+- `resources/list` / `prompts/list` surfaced as skills.
+- `harness mcp tools <name>` (per-server tool listing; `mcp list`
+  already shows them).
+- OAuth / bearer-token flows for hosted remote servers.
+- Request cancellation and progress notifications.
 
 ## Config
 
-`~/.ttacode/mcp.json` (created by `harness init` when empty):
+`~/.ttacode/mcp.json` (created empty by `harness init`):
 
 ```json
 {"servers": [
   {"name": "filesystem", "command": ["npx", "@modelcontextprotocol/server-filesystem", "/projects"]},
-  {"name": "remote-tools", "url": "http://127.0.0.1:9000/sse"}
+  {"name": "remote-tools", "url": "http://127.0.0.1:9000/mcp"}
 ]}
 ```
 
-## Security notes
-
-- Stdio servers run with the user's own permissions — same trust model
-  as the existing TalkToAi Code shell tools.
-- SSE URLs are validated as http(s) only; no credentials are stored in
-  the config file (use environment variables via the `env` mapping).
-- Tool results from MCP servers are untrusted data: they are quoted
-  into prompts, never executed.
-
-## Milestones
-
-- [ ] stdio transport + `initialize` handshake
-- [ ] `tools/list` → ToolRegistry adapter
-- [ ] `tools/call` end-to-end
-- [ ] SSE transport
-- [ ] `harness mcp list` shows live server status, `harness mcp tools <name>`
-- [ ] Agent loop consumes MCP tools alongside local tools
+See `docs/mcp.md` for a full worked example.

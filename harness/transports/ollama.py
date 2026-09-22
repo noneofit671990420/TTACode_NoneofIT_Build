@@ -27,21 +27,31 @@ def chat(
     messages: list[dict],
     stream: bool = False,
     timeout: float = 600.0,
+    options: dict | None = None,
+    keep_alive: str | None = None,
 ) -> dict | Iterator[dict]:
     """Send a chat request to an Ollama-compatible ``/api/chat`` endpoint.
 
     Non-streaming returns the decoded response dict. Streaming returns an
     iterator of decoded JSON chunks (each may carry
     ``message.content`` deltas and a final ``done: true`` chunk).
+
+    ``options`` overrides the default Ollama options (``num_ctx``,
+    ``temperature``, ``num_gpu`` …); ``keep_alive`` sets the Ollama
+    ``keep_alive`` duration (e.g. ``"30m"``) so the model stays warm in
+    VRAM between runs — the single biggest latency win on consumer GPUs.
     """
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-            "options": {"num_ctx": 8192, "temperature": 0.2},
-        }
-    ).encode()
+    merged = {"num_ctx": 8192, "temperature": 0.2}
+    merged.update(options or {})
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "options": merged,
+    }
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(
         url.rstrip("/") + "/api/chat",
         data=body,
@@ -82,15 +92,48 @@ class OllamaTransport:
         num_ctx: int = 8192,
         temperature: float = 0.2,
         timeout: float = 600.0,
+        keep_alive: str = "30m",
+        num_gpu: int = 0,
     ) -> None:
         self.url = url.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx
         self.temperature = temperature
         self.timeout = timeout
+        # keep_alive: how long Ollama keeps the model loaded in VRAM after
+        # a request ("30m", "24h", "-1" for forever). Warm models answer
+        # in seconds instead of tens of seconds on a 3080/4070.
+        self.keep_alive = keep_alive
+        # num_gpu: layers offloaded to GPU (0 = Ollama default/auto).
+        self.num_gpu = num_gpu
 
     def is_reachable(self, timeout: float = 3.0) -> bool:
         return is_reachable(self.url, timeout=timeout)
+
+    def warm(self) -> bool:
+        """Pre-load the model into VRAM with a minimal request.
+
+        Returns True when the model answered (i.e. it is now warm).
+        Used by ``harness models warm`` so the first real run is fast.
+        """
+        try:
+            data = chat(
+                self.url,
+                self.model,
+                [{"role": "user", "content": "ping"}],
+                timeout=300.0,
+                options=self._options(),
+                keep_alive=self.keep_alive,
+            )
+            return isinstance(data, dict)
+        except Exception:
+            return False
+
+    def _options(self) -> dict:
+        options = {"num_ctx": self.num_ctx, "temperature": self.temperature}
+        if self.num_gpu:
+            options["num_gpu"] = self.num_gpu
+        return options
 
     def chat(
         self, messages: list[dict], tools: list[dict] | None = None
@@ -106,10 +149,8 @@ class OllamaTransport:
                 "messages": messages,
                 "tools": tools or [],
                 "stream": False,
-                "options": {
-                    "num_ctx": self.num_ctx,
-                    "temperature": self.temperature,
-                },
+                "options": self._options(),
+                "keep_alive": self.keep_alive,
             }
         ).encode()
         request = urllib.request.Request(

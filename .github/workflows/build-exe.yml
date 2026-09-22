@@ -1,0 +1,39 @@
+# Build the headless harness Windows .exe and attach it to a GitHub Release.
+#
+# Triggers: pushing a tag like v0.2.0, or manually via "Run workflow".
+# The authoritative ttacode.exe is built here on windows-latest — never
+# cross-compiled from Linux. The release is created if the tag has none;
+# otherwise the exe is uploaded to the existing release.
+
+name: Build Windows exe
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build ttacode.exe
+        shell: powershell
+        run: .\build\build-exe.ps1
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ttacode.exe
+          generate_release_notes: true

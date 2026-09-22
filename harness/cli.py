@@ -5,8 +5,10 @@ Subcommands:
 * ``init``            first-run setup: scan models, pick a default, write config
 * ``models list``     show discovered models (disk + live Ollama)
 * ``models scan``     rescan on-disk model stores and print a summary
-* ``run --headless``  run a real headless agent task (Ollama + tools)
-* ``mcp list``        list configured MCP servers
+* ``models warm``     pre-load a model into VRAM so the first run is fast
+* ``run --headless``  run a real headless agent task (Ollama + tools + MCP)
+* ``mcp list``        list configured MCP servers (live status + tools)
+* ``mcp check``       test each MCP server (initialize + tools/list)
 * ``skills list``     list discovered skills
 
 Config lives at ``~/.ttacode/config.json``
@@ -116,6 +118,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     config.setdefault("context_budget_chars", 100000)
     config.setdefault("project_root", None)
     config.setdefault("shell_timeout", 120)
+    # Local-model performance tunables (see docs/performance.md).
+    # keep_alive keeps the model warm in VRAM between runs — the biggest
+    # latency win on consumer GPUs. num_gpu=0 leaves Ollama's default
+    # (auto offload) alone; set e.g. 999 to force full GPU offload.
+    config.setdefault("ollama_keep_alive", "30m")
+    config.setdefault("ollama_num_ctx", 8192)
+    config.setdefault("ollama_num_gpu", 0)
     path = save_config(config)
     print(f"Config written to {path} (re-running `harness init` is safe).")
     if not mcp_config_path().exists():
@@ -172,6 +181,7 @@ def _is_reachable(url: str) -> bool:
 
 def cmd_run(args: argparse.Namespace) -> int:
     from .agent.loop import AgentLoop
+    from .mcp.bridge import mount_mcp_tools
     from .models.scanner import discover_all, pick_default
     from .skills.loader import discover_skills
     from .tools import ToolRegistry, ToolContext, load_plugins
@@ -221,9 +231,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     for failure in plugins["failed"]:
         print(f"Warning: plugin skipped ({failure['path']}): {failure['error']}",
               file=sys.stderr)
+    # MCP servers: dead ones are warned about and skipped — never fatal.
+    mcp_bridge = mount_mcp_tools(registry, ctx)
+    for failure in mcp_bridge.failed:
+        print(f"Warning: MCP server {failure['name']!r} skipped: {failure['error']}",
+              file=sys.stderr)
 
     skills = discover_skills()
-    transport = OllamaTransport(url, model)
+    transport = OllamaTransport(
+        url,
+        model,
+        num_ctx=int(config.get("ollama_num_ctx", 8192)),
+        keep_alive=str(config.get("ollama_keep_alive", "30m")),
+        num_gpu=int(config.get("ollama_num_gpu", 0)),
+    )
     loop = AgentLoop(
         transport=transport,
         model=model,
@@ -232,14 +253,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         config=config,
         project_root=project_path,
         tool_context=ctx,
+        mcp_bridge=mcp_bridge,
     )
     print(f"Model : {model} ({url})")
     print(f"Project: {project_path}")
-    print(f"Tools : {len(builtin_added)} built-in"
-          + (f" + {len(plugins['loaded'])} plugin(s)" if plugins["loaded"] else "")
-          + (f", {len(skills)} skill(s)" if skills else ""))
+    tool_bits = [f"{len(builtin_added)} built-in"]
+    if plugins["loaded"]:
+        tool_bits.append(f"{len(plugins['loaded'])} plugin(s)")
+    if mcp_bridge.tool_count:
+        tool_bits.append(
+            f"{mcp_bridge.tool_count} MCP tool(s) "
+            f"from {mcp_bridge.server_count} server(s)"
+        )
+    if skills:
+        tool_bits.append(f"{len(skills)} skill(s)")
+    print(f"Tools : {' + '.join(tool_bits)}")
     print("-" * 60)
-    result = loop.run(args.prompt)
+    try:
+        result = loop.run(args.prompt)
+    finally:
+        loop.close()
     print()
     print(result["result"])
     print("-" * 60)
@@ -251,7 +284,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _describe_server(server) -> str:
+    if server.transport == "stdio":
+        return f"command: {' '.join([*server.command, *server.args])}"
+    return f"url: {server.url}"
+
+
 def cmd_mcp_list(args: argparse.Namespace) -> int:
+    from .mcp.bridge import check_server
     from .mcp.client import load_servers
 
     try:
@@ -261,12 +301,81 @@ def cmd_mcp_list(args: argparse.Namespace) -> int:
         return 1
     if not servers:
         print(f"No MCP servers configured ({mcp_config_path()}).")
+        print("Add entries to enable MCP tools; see docs/mcp.md.")
         return 0
     for server in servers:
-        via = f"command: {' '.join(server.command)}" if server.transport == "stdio" else f"url: {server.url}"
-        print(f"- {server.name} [{server.transport}] {via}")
-    print("\nNote: MCP transport is not yet implemented (docs/mcp-roadmap.md).")
+        report = check_server(server, timeout=8.0)
+        if report["ok"]:
+            tools = ", ".join(report["tools"][:8])
+            more = f" (+{report['tool_count'] - 8} more)" if report["tool_count"] > 8 else ""
+            proto = f"proto {report['protocol_version']}" if report["protocol_version"] else ""
+            print(f"- {server.name} [{server.transport}] {_describe_server(server)}")
+            print(f"    OK {proto}: {report['tool_count']} tool(s): {tools}{more}")
+        else:
+            print(f"- {server.name} [{server.transport}] {_describe_server(server)}")
+            print(f"    unreachable: {report['error']}")
     return 0
+
+
+def cmd_mcp_check(args: argparse.Namespace) -> int:
+    from .mcp.bridge import check_server
+    from .mcp.client import load_servers
+
+    try:
+        servers = load_servers(mcp_config_path())
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not servers:
+        print(f"No MCP servers configured ({mcp_config_path()}).")
+        return 1
+    failed = 0
+    for server in servers:
+        report = check_server(server, timeout=10.0)
+        if report["ok"]:
+            info = report["server_info"] or {}
+            label = info.get("name") or server.name
+            print(f"OK   {server.name}: {label} "
+                  f"(proto {report['protocol_version']}, "
+                  f"{report['tool_count']} tools)")
+        else:
+            failed += 1
+            print(f"FAIL {server.name}: {report['error']}")
+    print(f"{len(servers) - failed}/{len(servers)} server(s) OK.")
+    return 1 if failed else 0
+
+
+def cmd_models_warm(args: argparse.Namespace) -> int:
+    """Pre-load a model into VRAM so the first real run is fast."""
+    from .models.scanner import discover_all, pick_default
+    from .transports.ollama import OllamaTransport
+
+    config = load_config()
+    model = args.model or config.get("default_model")
+    if not model:
+        default = pick_default(discover_all())
+        if default is None:
+            print("No downloaded models found. Run `harness init` first.",
+                  file=sys.stderr)
+            return 1
+        model = default["name"]
+    url = _resolve_model_url(model)
+    if url is None:
+        print(f"Error: no reachable Ollama server serves {model!r}.",
+              file=sys.stderr)
+        return 1
+    transport = OllamaTransport(
+        url, model,
+        num_ctx=int(config.get("ollama_num_ctx", 8192)),
+        keep_alive=str(config.get("ollama_keep_alive", "30m")),
+        num_gpu=int(config.get("ollama_num_gpu", 0)),
+    )
+    print(f"Warming {model} on {url} (loads it into VRAM)…")
+    if transport.warm():
+        print(f"{model} is warm and ready.")
+        return 0
+    print(f"Error: warm-up request failed for {model!r}.", file=sys.stderr)
+    return 1
 
 
 def cmd_skills_list(args: argparse.Namespace) -> int:
@@ -284,8 +393,10 @@ def cmd_skills_list(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # The PyInstaller binary is named ttacode(.exe); python -m stays "harness".
+    prog = "ttacode" if Path(sys.argv[0]).stem == "ttacode" else "harness"
     parser = argparse.ArgumentParser(
-        prog="harness",
+        prog=prog,
         description="TTACode modular headless harness (stdlib-only core).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -299,6 +410,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.set_defaults(func=cmd_models_list)
     p_scan = msub.add_parser("scan", help="Rescan on-disk model stores.")
     p_scan.set_defaults(func=cmd_models_scan)
+    p_warm = msub.add_parser("warm", help="Pre-load a model into VRAM so the first run is fast.")
+    p_warm.add_argument("model", nargs="?", default=None,
+                        help="Model name (default: config default_model or auto-pick).")
+    p_warm.set_defaults(func=cmd_models_warm)
 
     p_run = sub.add_parser("run", help="Run a headless agent task.")
     p_run.add_argument("--headless", action="store_true", help="Headless mode (required).")
@@ -313,8 +428,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="MCP server commands.")
     mcsub = p_mcp.add_subparsers(dest="mcp_command", required=True)
-    p_mcp_list = mcsub.add_parser("list", help="List configured MCP servers.")
+    p_mcp_list = mcsub.add_parser("list", help="List configured MCP servers (live status).")
     p_mcp_list.set_defaults(func=cmd_mcp_list)
+    p_mcp_check = mcsub.add_parser("check", help="Test each MCP server (initialize + tools/list).")
+    p_mcp_check.set_defaults(func=cmd_mcp_check)
 
     p_skills = sub.add_parser("skills", help="Skill commands.")
     ssub = p_skills.add_subparsers(dest="skills_command", required=True)

@@ -75,6 +75,7 @@ class AgentLoop:
         config: dict | None = None,
         project_root: str | Path | None = None,
         tool_context=None,
+        mcp_bridge=None,
     ) -> None:
         self.transport = transport
         self.model = model
@@ -89,6 +90,10 @@ class AgentLoop:
         # The ToolContext handed to the tools (checkpoint/change tracking).
         # Optional: without it, the verification nudge simply never fires.
         self.tool_context = tool_context
+        # Optional MCPBridge owning live MCP server connections (mounted
+        # into the registry by the CLI). The loop does not manage it
+        # beyond offering close(); construction stays caller-driven.
+        self.mcp_bridge = mcp_bridge
         # "No artificial limits" contract — all configurable, generous defaults.
         self.max_steps = int(self.config.get("max_steps", 50))
         self.tool_output_limit = int(self.config.get("tool_output_limit", 12_000))
@@ -415,6 +420,15 @@ class AgentLoop:
         }
 
     # -- helpers --------------------------------------------------------------
+    def close(self) -> None:
+        """Release optional resources (currently: the MCP bridge)."""
+        bridge, self.mcp_bridge = self.mcp_bridge, None
+        if bridge is not None:
+            try:
+                bridge.close()
+            except Exception:
+                pass
+
     def _result_text(self, result) -> str:
         """Serialize a tool result for the model; cap at tool_output_limit."""
         if isinstance(result, str):

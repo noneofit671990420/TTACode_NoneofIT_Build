@@ -20,9 +20,41 @@ were modified or deleted** (only a section appended to `README.md`).
   - `tools/registry.py` — minimal `ToolRegistry` with `read_file` /
     `list_dir` proof-of-concept tools, bounded to a project root with
     path-escape protection (same idea as `app.py::safe_path`).
-  - `mcp/` — config loading only (`MCPServerConfig`, `load_servers`);
-    `MCPClient.connect()` honestly raises `NotImplementedError`.
-    Transport plan lives in `docs/mcp-roadmap.md`.
+  - `mcp/` — **real JSON-RPC 2.0 client** (`harness/mcp/client.py`):
+    stdio transport (subprocess, Content-Length framing, stderr drain
+    thread, id-matched requests with timeout) and HTTP transport
+    (streamable HTTP via urllib — plain JSON and SSE responses — plus
+    best-effort legacy SSE). `MCPClient` does the `initialize`
+    handshake with protocol-version negotiation, `tools/list` and
+    `tools/call` with text-content flattening. `harness/mcp/bridge.py`
+    mounts servers into the registry as `mcp__<server>__<tool>`
+    (`[mcp:<server>]` description prefix); dead servers warn and are
+    skipped, never breaking a run. The bridge is wired into
+    `AgentLoop` (optional `mcp_bridge`, `close()`) and the `run` CLI.
+    CLI: `mcp list` shows live status + tools, `mcp check` tests each
+    server. See `docs/mcp.md` for setup (incl. an npx filesystem-server
+    example) and `docs/mcp-roadmap.md` for status. Tests:
+    `tests/test_mcp.py` (19 tests: fake stdio server incl. timeout,
+    malformed, dead-server and negotiation cases; in-thread HTTP
+    server for both response variants; bridge prefixing + skip).
+  - `transports/ollama.py` — `OllamaTransport` now carries
+    `keep_alive` (default `"30m"` — the biggest latency win on
+    consumer GPUs), `num_ctx` and `num_gpu` through to the Ollama
+    request, plus `warm()` for pre-loading a model into VRAM.
+    CLI: `harness models warm [MODEL]`; `harness init` writes the
+    `ollama_keep_alive` / `ollama_num_ctx` / `ollama_num_gpu` tunables
+    (backward compatible, never clobbers user values). Rationale and
+    the honest verdict on the "new simplex algorithms" question live
+    in `docs/performance.md`.
+  - Packaging — `ttacode.spec` (PyInstaller single-file console exe,
+    Qt explicitly excluded), `build/build-exe.ps1` (Windows one-shot:
+    checks Python 3.10+, disposable `.build-venv`, builds, smoke-tests
+    `dist\ttacode.exe`), `.github/workflows/build-exe.yml` (builds on
+    `windows-latest` for every `v*` tag + manual dispatch, attaches the
+    exe to the GitHub Release). `tests/test_packaging.py` guards the
+    Qt-free/stdio-only import graph in a fresh interpreter.
+    `docs/install.md` is the user-facing install doc (unsigned-preview
+    SmartScreen note, same posture as upstream).
   - `skills/` — `SKILL.md` discovery + tiny built-in frontmatter parser
     (no PyYAML needed); example skill at `skills/example-hello/`.
   - `tools/` — full built-in toolset on `ToolRegistry`, all stdlib:
@@ -70,16 +102,20 @@ for the legacy Qt studio UI.
    `tests/test_agent_loop.py`, `tests/test_builtin_tools.py`,
    `tests/test_tool_plugins.py` (64 tests total with the scanner/skill
    suites, all passing).
-2. **MCP JSON-RPC** — implement stdio transport per `docs/mcp-roadmap.md`,
-   then adapt `tools/list` into the registry.
+2. ✅ **MCP JSON-RPC** — done: stdio + streamable HTTP (+ legacy SSE
+   best-effort), registry bridge, `mcp list`/`mcp check`, 19 tests.
+   Deferred: `resources/list` / `prompts/list` surfaced as skills,
+   `harness mcp tools <name>`, OAuth-bearing remote servers.
 3. ✅ **Skill injection** — active skill bodies are injected into the
    system prompt by `AgentLoop.build_system_prompt()`. Still open:
    `harness skills enable/disable`.
-4. **Qt UI as optional plugin** — slim `studio.py` down to a frontend over
+4. ✅ **Single-binary packaging** — done: `ttacode.spec`,
+   `build/build-exe.ps1`, CI workflow attaching `ttacode.exe` to
+   releases, `docs/install.md`. The authoritative .exe is built on
+   Windows CI; a Linux `--onedir` validation build proved the bundle
+   works (Linux binary, not a Windows exe).
+5. **Qt UI as optional plugin** — slim `studio.py` down to a frontend over
    the harness core instead of owning the agent logic.
-5. **Single-binary packaging** — PyInstaller one-dir/one-file build of
-   just the harness CLI for easy launch (`harness init` → pick model →
-   `harness run --headless "…"`).
 6. **Model bootstrap UX** — `harness models pull <name>` as an explicit,
    user-confirmed opt-in (never automatic), plus hardware-aware size
    warnings before large downloads.
