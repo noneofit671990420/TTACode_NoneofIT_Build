@@ -382,6 +382,41 @@ class TestChatTurn(unittest.TestCase):
         user_message = transport.payloads[0][1]
         self.assertNotIn("images", user_message)
 
+    def test_tools_unsupported_falls_back_to_tool_less(self):
+        script = [
+            RuntimeError(
+                "Ollama http://127.0.0.1:11434 model='moondream:latest': "
+                'HTTP 400 Bad Request {"error": '
+                '"registry.ollama.ai/library/moondream:latest '
+                'does not support tools"}'
+            ),
+            ("I see a cat.", []),
+        ]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        result = loop.chat_turn("what is this?", images=["aGVsbG8="])
+        self.assertEqual(result["stopped_reason"], "final_answer")
+        self.assertTrue(result["tools_unavailable"])
+        self.assertEqual(result["result"], "I see a cat.")
+        # First attempt carried tools; the retry went out tool-less.
+        self.assertTrue(transport.tools_seen[0])
+        self.assertEqual(transport.tools_seen[1], [])
+
+    def test_tools_unsupported_retry_failure_still_reports(self):
+        script = [
+            RuntimeError("model='x': HTTP 400 Bad Request does not support tools"),
+            RuntimeError("boom"),
+        ]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        result = loop.chat_turn("hi")
+        self.assertEqual(result["stopped_reason"], "transport_error")
+
+    def test_unrelated_transport_error_still_fails(self):
+        script = [RuntimeError("Ollama: HTTP 500 Internal Server Error")]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        result = loop.chat_turn("hi")
+        self.assertEqual(result["stopped_reason"], "transport_error")
+        self.assertNotIn("tools_unavailable", result)
+
 
 if __name__ == "__main__":
     unittest.main()

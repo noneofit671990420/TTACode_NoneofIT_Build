@@ -20,6 +20,7 @@ from .scanner import (
     is_ollama_servable,
     is_vision_model,
     pick_default,
+    vision_supports_tools,
 )
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "load_model",
     "pick_default",
     "resolve_model_url",
+    "vision_supports_tools",
     "vram_budget_bytes",
 ]

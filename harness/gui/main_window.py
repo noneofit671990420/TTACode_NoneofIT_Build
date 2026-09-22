@@ -356,6 +356,13 @@ class MainWindow(QMainWindow):
                 f'<div class="tools">used {len(calls)} tool call(s): '
                 f"{markdown.render(shown + extra)}</div>"
             )
+        if result.get("tools_unavailable"):
+            self._chat.append_html(
+                '<div class="tools">This model can\'t use tools, so I answered '
+                "without them (images still work). For full agentic use, "
+                "switch to a vision model that supports tools, e.g. "
+                "qwen2.5vl:7b.</div>"
+            )
         self._set_busy(False, f"Ready — {self._session.loaded.name}")
 
     # -- attachments --------------------------------------------------------

@@ -7,6 +7,7 @@ from harness.models import (
     discover_all,
     is_ollama_servable,
     is_vision_model,
+    vision_supports_tools,
 )
 
 
@@ -72,8 +73,18 @@ def list_gui_models() -> list[dict]:
 
 
 def find_vision_model(models: list[dict] | None = None) -> dict | None:
-    """First servable vision-capable model, or None."""
-    for entry in models if models is not None else list_gui_models():
+    """First servable vision-capable model, or None.
+
+    Vision models that can use Ollama tool calls are preferred —
+    agentic turns need tools. Chat-only vision models (e.g. moondream,
+    llava) are a fallback; the agent loop answers without tools for
+    them instead of failing the turn.
+    """
+    entries = models if models is not None else list_gui_models()
+    for entry in entries:
+        if entry["vision"] and vision_supports_tools(entry["name"]):
+            return entry
+    for entry in entries:
         if entry["vision"]:
             return entry
     return None

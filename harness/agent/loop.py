@@ -49,6 +49,13 @@ _MALFORMED_MARKERS = ("<function=", "<tool_call>", "</tool_call>")
 _FENCED_JSON = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.S | re.I)
 
 
+def _tools_unsupported_error(exc: BaseException) -> bool:
+    """True when the model server refused the request because the loaded
+    model can't take tool calls (e.g. Ollama HTTP 400
+    ``"model ... does not support tools"``)."""
+    return "does not support tools" in str(exc).lower()
+
+
 def _load_project_instructions(project_root: str | Path | None) -> str:
     """Port of ``agent_core.load_project_instructions``: one explicit
     workspace AGENTS.md, bounded, never scanning child folders."""
@@ -314,6 +321,7 @@ class AgentLoop:
         tool_log: list[dict] = []
         malformed_retries = 0
         verification_nudged = False
+        tools_unavailable = False
         changes_baseline = (
             len(self.tool_context.changes) if self.tool_context else 0
         )
@@ -321,15 +329,32 @@ class AgentLoop:
         for step in range(1, self.max_steps + 1):
             payload = self._prune(self.messages)
             try:
-                content, calls = self.transport.chat(payload, self._ollama_tools())
+                tools = [] if tools_unavailable else self._ollama_tools()
+                content, calls = self.transport.chat(payload, tools)
             except Exception as exc:
-                return {
-                    "result": f"Transport error before step {step}: {exc}",
-                    "steps": step - 1,
-                    "tool_calls": tool_log,
-                    "stopped_reason": "transport_error",
-                    "model": self.model,
-                }
+                if not tools_unavailable and _tools_unsupported_error(exc):
+                    # Model can't take Ollama tool calls (e.g. moondream):
+                    # answer tool-less instead of failing the turn.
+                    tools_unavailable = True
+                    known_tools = set()
+                    try:
+                        content, calls = self.transport.chat(payload, [])
+                    except Exception as retry_exc:
+                        return {
+                            "result": f"Transport error before step {step}: {retry_exc}",
+                            "steps": step - 1,
+                            "tool_calls": tool_log,
+                            "stopped_reason": "transport_error",
+                            "model": self.model,
+                        }
+                else:
+                    return {
+                        "result": f"Transport error before step {step}: {exc}",
+                        "steps": step - 1,
+                        "tool_calls": tool_log,
+                        "stopped_reason": "transport_error",
+                        "model": self.model,
+                    }
             content = content or ""
             calls = calls or []
             if not calls:
@@ -418,6 +443,7 @@ class AgentLoop:
                         "steps": step,
                         "tool_calls": tool_log,
                         "stopped_reason": "final_answer",
+                        "tools_unavailable": tools_unavailable,
                         "model": self.model,
                     }
 
@@ -462,6 +488,7 @@ class AgentLoop:
             "steps": self.max_steps,
             "tool_calls": tool_log,
             "stopped_reason": "max_steps",
+            "tools_unavailable": tools_unavailable,
             "model": self.model,
         }
 

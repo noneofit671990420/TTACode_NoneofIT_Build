@@ -320,6 +320,33 @@ def is_vision_model(name: str) -> bool:
     return any(marker in lowered for marker in _VISION_MARKERS)
 
 
+# Vision families known to reject Ollama ``tools`` on /api/chat
+# (HTTP 400 "does not support tools"). The agent loop falls back to
+# tool-less chat for these, but prefers tool-capable vision models
+# when auto-switching.
+_VISION_NO_TOOLS_MARKERS = (
+    "moondream",
+    "llava",
+    "bakllava",
+    "minicpm-v",
+    "cogvlm",
+)
+
+
+def vision_supports_tools(name: str) -> bool:
+    """Heuristic: can this vision model likely use Ollama tool calls?
+
+    Ollama exposes no capability flags, so models matching
+    ``_VISION_NO_TOOLS_MARKERS`` are treated as chat-only. Any other
+    vision model is assumed tool-capable; a wrong guess just means the
+    agent loop's no-tools fallback kicks in and reports it honestly.
+    """
+    lowered = (name or "").lower()
+    if not is_vision_model(name):
+        return False
+    return not any(marker in lowered for marker in _VISION_NO_TOOLS_MARKERS)
+
+
 def pick_default(
     models: list[dict],
     vram_gb: float | None = None,

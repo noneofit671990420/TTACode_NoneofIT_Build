@@ -14,6 +14,7 @@ from harness.models.scanner import (
     is_ollama_servable,
     is_vision_model,
     pick_default,
+    vision_supports_tools,
 )
 
 
@@ -225,6 +226,29 @@ class TestIsVisionModel(unittest.TestCase):
             "",
         ):
             self.assertFalse(is_vision_model(name), name)
+
+
+class TestVisionSupportsTools(unittest.TestCase):
+    def test_chat_only_vision_families(self):
+        for name in (
+            "moondream",
+            "moondream:latest",
+            "llava:7b",
+            "bakllava:7b",
+            "minicpm-v:8b",
+        ):
+            self.assertTrue(is_vision_model(name), name)
+            self.assertFalse(vision_supports_tools(name), name)
+
+    def test_tool_capable_vision_families(self):
+        for name in (
+            "qwen2.5vl:7b",
+            "llama3.2-vision:11b",
+        ):
+            self.assertTrue(vision_supports_tools(name), name)
+
+    def test_non_vision_is_not_tool_capable_vision(self):
+        self.assertFalse(vision_supports_tools("qwen2.5-coder:7b"))
 
 
 class TestLmStudioScanFilters(unittest.TestCase):
