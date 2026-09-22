@@ -33,7 +33,6 @@ from harness.cli import load_config, save_config
 from harness.gui import images as image_helpers
 from harness.gui import markdown, theme
 from harness.gui.models import find_vision_model, list_gui_models
-from harness.gui.specs import analyze_machine, recommend_models, spec_card_html
 from harness.gui.worker import (
     ChatWorker,
     PullWorker,
@@ -76,7 +75,7 @@ class ChatView(QTextBrowser):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("TTACode")
         self.resize(1000, 740)
@@ -90,6 +89,7 @@ class MainWindow(QMainWindow):
         self._img_ids = itertools.count(1)
         self._pulling = False
         self._pull_model: str | None = None
+        self._initial_model = model
 
         self._build_ui()
         self._thinking_timer = QTimer(self)
@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         self._thinking_timer.timeout.connect(self._tick_thinking)
         self._thinking_dots = 0
 
-        self._start_setup()
+        self._start_setup(model=self._initial_model)
 
     # -- UI construction -------------------------------------------------
     def _build_ui(self) -> None:
@@ -214,7 +214,6 @@ class MainWindow(QMainWindow):
         self._set_busy(False, f"Ready — {session.loaded.name}")
         if first:
             self._welcome()
-            self._show_spec_card(session.loaded.name)
         if self._pending_send is not None:
             text, paths = self._pending_send
             self._pending_send = None
@@ -240,34 +239,27 @@ class MainWindow(QMainWindow):
             "</div></div>"
         )
 
-    def _show_spec_card(self, current_model: str) -> None:
-        """One-time launch card: machine specs + best-model recommendations.
-
-        Best-effort and fast; never blocks the UI and never raises — a
-        missing reading just means a shorter card.
-        """
-        try:
-            spec = analyze_machine()
-            recs = recommend_models(spec)
-            entries = list_gui_models()
-            installed = {e["name"] for e in entries}
-            fits = next(
-                (e["fits_vram"] for e in entries if e["name"] == current_model),
-                None,
-            )
-            self._chat.append_html(
-                spec_card_html(spec, recs, installed, current_model, fits)
-            )
-        except Exception:
-            pass
-
     # -- models ------------------------------------------------------------
     def _refresh_models(self, current: str) -> None:
         combo = self._model_combo
         combo.blockSignals(True)
         combo.clear()
-        for entry in list_gui_models():
+        entries = list_gui_models()
+        for entry in entries:
             combo.addItem(entry["label"], entry["name"])
+        if not entries:
+            # Never strand the user in front of an empty dropdown: the
+            # precheck dialog guarantees models at launch, but if discovery
+            # later comes back empty (Ollama stopped?), say so plainly and
+            # point at the fix instead of showing a dead control.
+            combo.addItem("No models found — restart the app", None)
+            self._chat.append_html(
+                '<div class="msg notice"><div class="who">TTACODE</div>'
+                "<p>⚠ I can't see any installed models right now. "
+                "Ollama may have stopped — start it and reopen TTACode, "
+                "and the first-run check will guide you from there.</p>"
+                "</div>"
+            )
         index = combo.findData(current)
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
