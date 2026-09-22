@@ -8,6 +8,7 @@ from harness.models.loader import (
     ModelLoadError,
     detect_vram_gb,
     load_model,
+    resolve_model_url,
     vram_budget_bytes,
 )
 from harness.models.scanner import pick_default
@@ -38,6 +39,49 @@ class FakeTransport:
     def warm(self):
         self.warm_calls += 1
         return self.warm_result
+
+
+class TestResolveModelUrl(unittest.TestCase):
+    def _live(self, mapping):
+        return mock.patch.object(loader, "discover_live_models", return_value=mapping)
+
+    def test_exact_match_returns_server_name(self):
+        with self._live({11434: ["qwen2.5-coder:7b"], 11435: []}):
+            self.assertEqual(
+                resolve_model_url("qwen2.5-coder:7b"),
+                ("http://127.0.0.1:11434", "qwen2.5-coder:7b"),
+            )
+
+    def test_bare_stem_resolves_to_tagged_server_name(self):
+        with self._live({11434: ["qwen2.5-coder:7b"], 11435: []}):
+            self.assertEqual(
+                resolve_model_url("qwen2.5-coder"),
+                ("http://127.0.0.1:11434", "qwen2.5-coder:7b"),
+            )
+
+    def test_latest_variant_matches(self):
+        with self._live({11434: ["qwen2.5-coder:latest"], 11435: []}):
+            self.assertEqual(
+                resolve_model_url("qwen2.5-coder"),
+                ("http://127.0.0.1:11434", "qwen2.5-coder:latest"),
+            )
+
+    def test_no_server_lists_model_returns_none_not_wrong_server(self):
+        # Regression: the old "first reachable server" fallback produced
+        # an HTTP 404 on the first chat call of the run.
+        with self._live({11434: ["other:1b"], 11435: []}):
+            self.assertIsNone(resolve_model_url("qwen2.5-coder:7b"))
+
+    def test_prefers_server_that_lists_model(self):
+        with self._live({11434: ["other:1b"], 11435: ["qwen2.5-coder:7b"]}):
+            self.assertEqual(
+                resolve_model_url("qwen2.5-coder:7b"),
+                ("http://127.0.0.1:11435", "qwen2.5-coder:7b"),
+            )
+
+    def test_nothing_live_returns_none(self):
+        with self._live({11434: [], 11435: []}):
+            self.assertIsNone(resolve_model_url("qwen2.5-coder:7b"))
 
 
 class TestVramAwarePick(unittest.TestCase):
@@ -135,7 +179,9 @@ class TestLoadModel(unittest.TestCase):
         self._patches = [
             mock.patch.object(loader, "discover_all", return_value=self.models),
             mock.patch.object(
-                loader, "resolve_model_url", return_value="http://127.0.0.1:11434"
+                loader, "resolve_model_url",
+                side_effect=lambda model, ports: (
+                    "http://127.0.0.1:11434", model),
             ),
             mock.patch.object(loader, "OllamaTransport", side_effect=fake_transport),
         ]
@@ -200,8 +246,32 @@ class TestLoadModel(unittest.TestCase):
 
     def test_unreachable_server_raises_honestly(self):
         with mock.patch.object(loader, "resolve_model_url", return_value=None):
-            with self.assertRaises(ModelLoadError):
-                load_model(None, {}, out=self.quiet)
+            with mock.patch.object(loader, "is_reachable", return_value=False):
+                with self.assertRaises(ModelLoadError) as ctx:
+                    load_model(None, {}, out=self.quiet)
+        self.assertIn("ollama serve", str(ctx.exception))
+
+    def test_server_up_but_model_missing_names_pull(self):
+        # The old code returned the first reachable server here, which
+        # 404'd on the first chat call. Now it must fail fast instead.
+        with mock.patch.object(loader, "resolve_model_url", return_value=None):
+            with mock.patch.object(loader, "is_reachable", return_value=True):
+                with self.assertRaises(ModelLoadError) as ctx:
+                    load_model(None, {}, out=self.quiet)
+        msg = str(ctx.exception)
+        self.assertIn("ollama pull", msg)
+        self.assertNotIn("404", msg)
+
+    def test_server_canonical_name_wins_over_requested(self):
+        # --model qwen2.5-coder with qwen2.5-coder:7b on the server:
+        # the transport must send the server's name, not the bare stem.
+        with mock.patch.object(
+            loader, "resolve_model_url",
+            return_value=("http://127.0.0.1:11434", "qwen2.5-coder:7b"),
+        ):
+            loaded = load_model("qwen2.5-coder", {}, out=self.quiet)
+        self.assertEqual(loaded.name, "qwen2.5-coder:7b")
+        self.assertEqual(self.transports[0].model, "qwen2.5-coder:7b")
 
     def test_no_warm_skips_warmup(self):
         loaded = load_model(None, {"vram_gb": 8.0}, warm=False, out=self.quiet)

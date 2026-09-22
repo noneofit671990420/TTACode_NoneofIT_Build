@@ -8,6 +8,7 @@ yields decoded JSON lines as they arrive.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 
@@ -158,13 +159,18 @@ class OllamaTransport:
             data=body,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            if response.status != 200:
-                raise RuntimeError(
-                    f"Ollama HTTP {response.status}: "
-                    + response.read(1500).decode(errors="replace")
-                )
-            data = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.load(response)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(1500).decode(errors="replace")
+            except Exception:
+                detail = ""
+            raise RuntimeError(
+                f"Ollama {self.url} model={self.model!r}: "
+                f"HTTP {exc.code} {exc.reason} {detail}".strip()
+            ) from exc
         message = data.get("message", {}) or {}
         content = message.get("content") or ""
         calls: list[dict] = []

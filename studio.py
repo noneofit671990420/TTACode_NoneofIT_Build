@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
     QTextBrowser, QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QInputDialog,
     QSystemTrayIcon, QMenu, QDialog, QLineEdit, QCheckBox, QDialogButtonBox)
 from agent_core import ProjectTools, run_agent, restore_checkpoint, set_active_remote, set_agent_preferences, set_active_provider
-from routing import choose_route, ensure_local_model
+from routing import choose_route
 from ssh_tools import SSHProfile, SSHSession, load_profiles, save_profiles
 from providers import ProviderProfile, load_profiles as load_provider_profiles, save_profiles as save_provider_profiles
 from desktop_inventory import inspect_desktop
@@ -141,6 +141,7 @@ class Studio(QMainWindow):
         self.install_tray()
         self.refresh_connection_label()
         self.refresh_access_label()
+        QTimer.singleShot(800, self.migrate_local_model)
 
     def install_tray(self):
         icon=QPixmap(64,64);icon.fill(Qt.transparent)
@@ -529,6 +530,7 @@ class Studio(QMainWindow):
         elif kind=='change':self.task['changes'].append(data);self.persist();self.refresh_changes()
         elif kind=='status':self.status.setText(data)
         elif kind=='health':self.health_label.setText(data)
+        elif kind=='local_model':self._apply_local_model(data)
         elif kind=='error':
             self.status.setText('Request failed');self.output.appendPlainText(str(data));self.right.setCurrentIndex(2)
             self.task['messages'].append({'role':'assistant','content':'Task error: '+str(data)});self.persist();self.render()
@@ -833,7 +835,7 @@ Use Auto or AMD, stop a task, or steer it into a smaller request. The AMD route 
 
 **AMD Qwen3-Coder 30B-A3B** — default coding route. This is a 30B total / 3B active MoE model and stays on your AMD server. TalkToAi Code checks the server inventory before every task.
 
-**Qwen3.8 27B** — the larger local option for this PC. Select **Local · Qwen3.8 27B** and TalkToAi Code will run `ollama pull smtek/Qwen3.8-27B` once if it is missing. It is a large download and needs substantial RAM; the first run can be slow.
+**Qwen3.8 27B** — the larger local option for this PC. Use **Use installed local model…** below to point the **Local** route at any model already on this PC. TalkToAi Code never downloads models by itself.
 
 **Qwen3.5 4B · about 3.4 GB** — compact local option with tool and image support. Suitable for trials on this PC; check local test results before expecting AMD performance. [Model details](https://ollama.com/library/qwen3.5:4b)
 
@@ -845,7 +847,7 @@ Use Auto or AMD, stop a task, or steer it into a smaller request. The AMD route 
 
 **Granite 4 micro 3.4B · about 2.1 GB** — optional IBM tool-capable model for smaller tasks. Not installed or benchmarked here. [Model details](https://ollama.com/library/granite4:micro)
 
-The compact model is intentionally kept as the weak-CPU fallback. TalkToAi Code never pulls a large model merely by opening this panel: downloads happen only when you choose that route and send a task, with progress shown in the status line.
+The Studio checks the live Ollama inventory before every task, warms the chosen model into VRAM, and tunes `num_gpu` / `num_ctx` / `keep_alive` at load time. Missing models are reported with the exact `ollama pull` / `ollama create` command that fixes them — nothing is ever downloaded automatically.
 ''');layout.addWidget(info)
         row=QHBoxLayout();self.button('Use installed local model…',self.select_installed_model,row);self.button('Close',dialog.accept,row);layout.addLayout(row)
         dialog.exec()
@@ -862,6 +864,58 @@ The compact model is intentionally kept as the weak-CPU fallback. TalkToAi Code 
                 name=choices[labels.index(label)]['name']
                 self.config['local_model']=name;(HOME/'config.json').write_text(json.dumps(self.config,indent=2),encoding='utf-8');self.route.setCurrentIndex(1);self.health()
         except Exception as exc:self.error(exc)
+
+    def migrate_local_model(self):
+        """Point the Local route at a model that is actually on this PC.
+
+        Deferred after startup and run off the UI thread (live inventory
+        probes can block for seconds when a server is down). If the
+        configured ``local_model`` is not Ollama-servable here (e.g. the
+        stale ``qwen3.5:4b`` factory default), fall back to the harness
+        VRAM-aware default pick. Switching stays available any time via
+        Ctrl+K -> Model choices and storage -> Use installed local model.
+        """
+        def work():
+            try:
+                cfg = self.harness_config()
+                names = {c["name"] for c in servable_model_choices(cfg)}
+                default = harness_default_model(cfg)
+                error = None
+            except Exception as exc:
+                names, default, error = set(), None, str(exc)
+            self.bus.event.emit("local_model", {"names": names, "default": default, "error": error})
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_local_model(self, data):
+        current = (self.config.get("local_model") or "").strip()
+        if data.get("error"):
+            self.status.setText("Model check failed: " + str(data["error"]))
+            return
+        if current in data["names"]:
+            self._refresh_route_labels(current)
+            return
+        default = data.get("default")
+        if not default:
+            self.status.setText("No Ollama-servable models on this PC: `ollama pull <name>` one, or import a GGUF with `ollama create`.")
+            return
+        self.config["local_model"] = default
+        try:
+            (HOME / "config.json").write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        self._refresh_route_labels(default)
+        if current:
+            self.status.setText(
+                "Local model '" + current + "' isn't on this PC: using '" + default + "' instead "
+                "(Ctrl+K -> Model choices and storage to change it)."
+            )
+        else:
+            self.status.setText("Local model: " + default)
+
+    def _refresh_route_labels(self, local_model):
+        large = (self.config.get("local_large_model") or "").strip() or local_model
+        self.route.setItemText(1, "Local \u00b7 " + local_model)
+        self.route.setItemText(3, "Local \u00b7 " + large)
 
     def export_task(self):
         folder=Path(self.task['project'])/'.talktoai-code/reports';folder.mkdir(parents=True,exist_ok=True)

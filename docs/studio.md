@@ -64,3 +64,14 @@ build**. Windows SmartScreen will likely warn on first launch — *More
 info → Run anyway* if you trust the build. Both exes are produced by
 GitHub Actions from the tagged source (`.github/workflows/build-exe.yml`),
 so you can audit exactly what went into them.
+
+## Startup model check (v0.2.1+)
+
+Shortly after launch, the Studio verifies that its configured local model
+is actually Ollama-servable on this PC (off the UI thread). If it is not —
+e.g. the old `qwen3.5:4b` factory default — the Studio falls back to the
+harness VRAM-aware default pick, persists it, and says so in the status
+line. The Local route labels always show the model that will really run.
+Switch any time via Ctrl+K → Model choices and storage → Use installed
+local model… The Studio never downloads models; missing ones are reported
+with the exact `ollama pull` / `ollama create` command that fixes them.

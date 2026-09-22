@@ -251,7 +251,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .tools.builtin import register_all
 
     if not args.headless:
-        print("Only --headless mode is supported by the harness CLI.", file=sys.stderr)
+        print("The harness CLI is headless-only: ttacode run --headless \"<task>\". "
+              "The agent runs tools itself (shell, files, web, MCP); there is no "
+              "interactive mode.", file=sys.stderr)
         return 2
 
     config = load_config()

@@ -70,21 +70,29 @@ def vram_budget_bytes(vram_gb: float | None) -> int | None:
 
 def resolve_model_url(
     model: str, ports: tuple[int, ...] = (11434, 11435)
-) -> str | None:
-    """Pick a reachable Ollama endpoint that serves ``model``.
+) -> tuple[str, str] | None:
+    """Find a reachable Ollama endpoint whose ``/api/tags`` lists ``model``.
 
-    Prefers a server whose /api/tags actually lists the model (or its
-    ``:latest`` variant); falls back to the first reachable server;
-    ``None`` when nothing answers.
+    Returns ``(url, server_name)`` — the server's canonical model name,
+    which can differ from ``model`` when the caller omits the tag
+    (``qwen2.5-coder`` → ``qwen2.5-coder:7b``). The transport must use
+    the server's name: sending a name the server doesn't list is what
+    used to surface as a cryptic HTTP 404 on the first chat call.
+
+    Returns ``None`` when no server lists the model. There is deliberately
+    no "first reachable server" fallback — a reachable server that does
+    not serve this model is not a usable endpoint, and pretending it is
+    only moved the failure to step 1 of the run.
     """
     live = discover_live_models(ports)
     for port in ports:
-        names = live.get(port, [])
-        if model in names or model + ":latest" in names or model.split(":")[0] in names:
-            return f"http://127.0.0.1:{port}"
-    for port in ports:
-        if is_reachable(f"http://127.0.0.1:{port}"):
-            return f"http://127.0.0.1:{port}"
+        for server_name in live.get(port, []):
+            if (
+                server_name == model
+                or server_name == model + ":latest"
+                or server_name.startswith(model + ":")
+            ):
+                return f"http://127.0.0.1:{port}", server_name
     return None
 
 
@@ -193,12 +201,21 @@ def load_model(
             )
     model_name = record["name"]
 
-    url = resolve_model_url(model_name, ports)
-    if url is None:
+    resolved = resolve_model_url(model_name, ports)
+    if resolved is None:
+        # Honest, actionable — never hand the run a server that 404s.
+        if any(is_reachable(f"http://127.0.0.1:{p}") for p in ports):
+            raise ModelLoadError(
+                f"Ollama is running on {ports}, but no server there lists "
+                f"{model_name!r}. Pull it (`ollama pull {model_name}`) or, "
+                "for an LM Studio GGUF, import it (`ollama create <name> "
+                "-f Modelfile` with a `FROM <path>` line), then re-run."
+            )
         raise ModelLoadError(
             f"No reachable Ollama server on {ports} serves {model_name!r}. "
             "Start Ollama (`ollama serve`) and re-run."
         )
+    url, model_name = resolved
 
     num_gpu = int(config.get("ollama_num_gpu", -1))
     num_ctx = int(config.get("ollama_num_ctx", 8192))
