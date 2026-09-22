@@ -68,30 +68,65 @@ def _format_size(size_bytes) -> str:
     return f"{size_bytes / (1024**2):.0f} MiB"
 
 
-def _print_models(models: list[dict]) -> None:
+def _print_models(models: list[dict], vram_gb: float | None = None) -> None:
     if not models:
         print("No models found (no disk stores, no live Ollama servers).")
         return
-    print(f"{'MODEL':<48} {'SOURCE':<8} {'SIZE':<12}")
-    print("-" * 72)
+    budget = (
+        int(vram_gb * 0.9 * (1024**3))
+        if isinstance(vram_gb, (int, float)) and vram_gb > 0
+        else None
+    )
+    fit_col = budget is not None
+    header = f"{'MODEL':<48} {'SOURCE':<8} {'SIZE':<12}"
+    if fit_col:
+        header += " FIT"
+    print(header)
+    print("-" * (72 + (4 if fit_col else 0)))
     for model in models:
-        print(
+        size = model.get("size_bytes")
+        marker = ""
+        if fit_col:
+            if isinstance(size, int):
+                marker = "✓" if size <= budget else "!"
+            else:
+                marker = "?"
+        line = (
             f"{model['name']:<48} {model['source']:<8} "
-            f"{_format_size(model.get('size_bytes')):<12}"
+            f"{_format_size(size):<12}"
         )
+        if fit_col:
+            line += f" {marker}"
+        print(line)
+    if fit_col:
+        print("FIT: ✓ fits VRAM budget (90%) · ! exceeds budget, expect CPU spill · "
+              "? size unknown")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     """First-run setup. Read-only scan, never downloads anything."""
+    from .models.loader import detect_vram_gb
     from .models.scanner import discover_all, pick_default
 
     print("Scanning for models already on this PC (disk stores + live Ollama)…")
     models = discover_all()
-    _print_models(models)
+
+    config = load_config()
+    # VRAM detection (best-effort; never clobbers an existing value).
+    if "vram_gb" not in config:
+        detected = detect_vram_gb()
+        if detected:
+            config["vram_gb"] = detected
+            print(f"Detected GPU VRAM: {detected:.1f} GiB (via nvidia-smi).")
+        else:
+            config["vram_gb"] = 8.0
+            print("Could not detect GPU VRAM (no nvidia-smi); assuming 8.0 GiB — "
+                  "adjust `vram_gb` in the config if that's wrong.")
+    vram_gb = config.get("vram_gb")
+    _print_models(models, vram_gb=vram_gb)
     print()
 
-    default = pick_default(models)
-    config = load_config()
+    default = pick_default(models, vram_gb=vram_gb)
     if default is None:
         print(
             "No downloaded models found. Install Ollama and pull a model, e.g.\n"
@@ -104,6 +139,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         reason = (
             f"source={default['source']}, size={_format_size(default.get('size_bytes'))}"
         )
+        size = default.get("size_bytes")
+        budget = (
+            int(vram_gb * 0.9 * (1024**3))
+            if isinstance(vram_gb, (int, float)) and vram_gb > 0 and isinstance(size, int)
+            else None
+        )
+        if budget is not None and size > budget:
+            reason += " — WARNING: exceeds 90% VRAM budget, expect CPU spill"
         print(f"Default model: {default['name']} ({reason})")
         config["default_model"] = default["name"]
     config["model_sources"] = {
@@ -120,11 +163,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     config.setdefault("shell_timeout", 120)
     # Local-model performance tunables (see docs/performance.md).
     # keep_alive keeps the model warm in VRAM between runs — the biggest
-    # latency win on consumer GPUs. num_gpu=0 leaves Ollama's default
-    # (auto offload) alone; set e.g. 999 to force full GPU offload.
+    # latency win on consumer GPUs. ollama_num_gpu=-1 asks Ollama to
+    # offload as many layers as the GPU can hold (its own default);
+    # 0 would disable GPU offload entirely.
     config.setdefault("ollama_keep_alive", "30m")
     config.setdefault("ollama_num_ctx", 8192)
-    config.setdefault("ollama_num_gpu", 0)
+    config.setdefault("ollama_num_gpu", -1)
+    # Model-load behavior (see harness/models/loader.py). warm_on_load
+    # makes every `run` pre-load the model into VRAM automatically.
+    config.setdefault("warm_on_load", True)
     path = save_config(config)
     print(f"Config written to {path} (re-running `harness init` is safe).")
     if not mcp_config_path().exists():
@@ -138,7 +185,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_models_list(args: argparse.Namespace) -> int:
     from .models.scanner import discover_all
 
-    _print_models(discover_all())
+    _print_models(discover_all(), vram_gb=load_config().get("vram_gb"))
     return 0
 
 
@@ -153,40 +200,34 @@ def cmd_models_scan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_model_url(model: str, ports: tuple[int, ...] = (11434, 11435)) -> str | None:
-    """Pick a reachable Ollama endpoint that serves ``model``.
+def cmd_models_warm(args: argparse.Namespace) -> int:
+    """Pre-load a model into VRAM so the first real run is fast.
 
-    Prefers a server whose /api/tags actually lists the model (or its
-    :latest variant); falls back to the first reachable server; None
-    when nothing answers.
+    Manual version of what `run --headless` now does automatically at
+    load time (see harness/models/loader.py).
     """
-    from .models.scanner import discover_live_models
+    from .models.loader import ModelLoadError, load_model
 
-    live = discover_live_models(ports)
-    for port in ports:
-        names = live.get(port, [])
-        if model in names or model + ":latest" in names or model.split(":")[0] in names:
-            return f"http://127.0.0.1:{port}"
-    for port in ports:
-        if _is_reachable(f"http://127.0.0.1:{port}"):
-            return f"http://127.0.0.1:{port}"
-    return None
-
-
-def _is_reachable(url: str) -> bool:
-    from .transports.ollama import is_reachable
-
-    return is_reachable(url)
+    config = load_config()
+    try:
+        loaded = load_model(args.model, config, warm=True)
+    except ModelLoadError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if loaded.warmed:
+        print(f"{loaded.name} is warm and ready.")
+        return 0
+    print(f"Error: warm-up request failed for {loaded.name!r}.", file=sys.stderr)
+    return 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     from .agent.loop import AgentLoop
     from .mcp.bridge import mount_mcp_tools
-    from .models.scanner import discover_all, pick_default
+    from .models.loader import ModelLoadError, load_model
     from .skills.loader import discover_skills
     from .tools import ToolRegistry, ToolContext, load_plugins
     from .tools.builtin import register_all
-    from .transports.ollama import OllamaTransport
 
     if not args.headless:
         print("Only --headless mode is supported by the harness CLI.", file=sys.stderr)
@@ -199,26 +240,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: project directory does not exist: {project}", file=sys.stderr)
         return 1
 
-    # Model: explicit flag > config default > auto-pick from disk scan.
-    model = args.model or config.get("default_model")
-    if not model:
-        default = pick_default(discover_all())
-        if default is None:
-            print(
-                "No downloaded models found. Run `harness init` for guidance.",
-                file=sys.stderr,
-            )
-            return 1
-        model = default["name"]
-    url = _resolve_model_url(model)
-    if url is None:
-        print(
-            f"Error: no reachable Ollama server on :11434/:11435 serves {model!r}.\n"
-            "Start Ollama (`ollama serve`) and make sure the model is pulled, "
-            "then re-run. `harness models list` shows what this PC has.",
-            file=sys.stderr,
-        )
+    # Model load: resolve → tune (num_gpu/num_ctx/keep_alive) → warm into
+    # VRAM. One path for the whole CLI (see harness/models/loader.py).
+    try:
+        loaded = load_model(args.model, config, warm=not args.no_warm)
+    except ModelLoadError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
+    model = loaded.name
+    url = loaded.url
+    transport = loaded.transport
 
     # Loop tunables: CLI flag > config > built-in defaults (see AgentLoop).
     if args.max_steps is not None:
@@ -238,13 +269,6 @@ def cmd_run(args: argparse.Namespace) -> int:
               file=sys.stderr)
 
     skills = discover_skills()
-    transport = OllamaTransport(
-        url,
-        model,
-        num_ctx=int(config.get("ollama_num_ctx", 8192)),
-        keep_alive=str(config.get("ollama_keep_alive", "30m")),
-        num_gpu=int(config.get("ollama_num_gpu", 0)),
-    )
     loop = AgentLoop(
         transport=transport,
         model=model,
@@ -345,39 +369,6 @@ def cmd_mcp_check(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def cmd_models_warm(args: argparse.Namespace) -> int:
-    """Pre-load a model into VRAM so the first real run is fast."""
-    from .models.scanner import discover_all, pick_default
-    from .transports.ollama import OllamaTransport
-
-    config = load_config()
-    model = args.model or config.get("default_model")
-    if not model:
-        default = pick_default(discover_all())
-        if default is None:
-            print("No downloaded models found. Run `harness init` first.",
-                  file=sys.stderr)
-            return 1
-        model = default["name"]
-    url = _resolve_model_url(model)
-    if url is None:
-        print(f"Error: no reachable Ollama server serves {model!r}.",
-              file=sys.stderr)
-        return 1
-    transport = OllamaTransport(
-        url, model,
-        num_ctx=int(config.get("ollama_num_ctx", 8192)),
-        keep_alive=str(config.get("ollama_keep_alive", "30m")),
-        num_gpu=int(config.get("ollama_num_gpu", 0)),
-    )
-    print(f"Warming {model} on {url} (loads it into VRAM)…")
-    if transport.warm():
-        print(f"{model} is warm and ready.")
-        return 0
-    print(f"Error: warm-up request failed for {model!r}.", file=sys.stderr)
-    return 1
-
-
 def cmd_skills_list(args: argparse.Namespace) -> int:
     from .skills.loader import discover_skills
 
@@ -423,6 +414,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Model name (default: config default_model or auto-pick).")
     p_run.add_argument("--max-steps", type=int, default=None,
                        help="Max agent steps (default: config max_steps, 50).")
+    p_run.add_argument("--no-warm", action="store_true",
+                       help="Skip the automatic VRAM warm-up at model load.")
     p_run.add_argument("prompt", help="The task prompt.")
     p_run.set_defaults(func=cmd_run)
 

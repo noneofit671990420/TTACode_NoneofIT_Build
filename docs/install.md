@@ -9,6 +9,13 @@ Two ways to get the harness. Both end at the same CLI.
    GPU can hold — see [performance](performance.md).
 2. Download **`ttacode.exe`** from the
    [Releases page](https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases).
+
+   **Stable shareable link** (always the newest release's exe — use this
+   when linking the build for others):
+   `https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases/latest/download/ttacode.exe`
+   The CI workflow (`.github/workflows/build-exe.yml`) uploads the asset
+   under exactly the name `ttacode.exe` on every `v*` tag, so this link
+   stays valid across releases.
 3. Put it somewhere on your PATH (e.g. `C:\Tools`) or just run it from
    its folder.
 4. Open a terminal and run:

@@ -253,16 +253,27 @@ def _capability_score(name: str) -> int:
     return score
 
 
-def pick_default(models: list[dict]) -> dict | None:
+def pick_default(models: list[dict], vram_gb: float | None = None) -> dict | None:
     """Pick a sane default model from discovered models.
 
     Heuristic (documented, deterministic):
 
     1. Consider only downloaded models (``source`` is ``"disk"`` or
        ``"both"``) — a default must work offline with zero downloads.
-    2. Rank by capability score (:func:`_capability_score`).
-    3. Break ties by smallest known size (fits more machines).
-    4. Final tie-break: alphabetical name, so the choice is stable.
+    2. When ``vram_gb`` is given, prefer downloaded models whose known
+       size fits in 90% of VRAM (headroom for context/KV cache plus OS
+       overhead). A model that fits fully in VRAM is dramatically faster
+       than one spilling to system RAM, so fit wins over raw capability.
+       Models with unknown size are never excluded — they simply can't
+       win the fit check and stay eligible as fallbacks.
+    3. Rank by capability score (:func:`_capability_score`).
+    4. Break ties by smallest known size (fits more machines).
+    5. Final tie-break: alphabetical name, so the choice is stable.
+
+    If nothing fits the VRAM budget, the heuristic falls back to the
+    plain ranking over all downloaded models (smallest capable first) —
+    callers should warn that CPU spill is expected (see
+    ``harness.models.loader``).
 
     Returns the winning record, or ``None`` when nothing is downloaded.
     """
@@ -275,5 +286,17 @@ def pick_default(models: list[dict]) -> dict | None:
         # Unknown size sorts after known sizes of equal score.
         size_key = size if isinstance(size, int) else 2**63
         return (-_capability_score(record.get("name", "")), size_key, record.get("name", ""))
+
+    if vram_gb is not None and vram_gb > 0:
+        budget_bytes = int(vram_gb * 0.9 * (1024**3))
+        fits = [
+            m for m in downloaded
+            if isinstance(m.get("size_bytes"), int)
+            and m["size_bytes"] <= budget_bytes
+        ]
+        if fits:
+            return sorted(fits, key=rank)[0]
+        # Nothing fits: fall through to the plain ranking; the caller
+        # warns about expected CPU spill.
 
     return sorted(downloaded, key=rank)[0]
