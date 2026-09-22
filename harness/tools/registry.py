@@ -1,9 +1,11 @@
-"""Minimal tool registry with 2-3 built-in proof-of-concept tools.
+"""Tool registry: named tools the agent loop may call.
 
 Tools are registered as ``(name, description, schema, handler)`` where the
 handler receives a dict of arguments and returns a JSON-serializable
-result. The built-ins are bounded to a project root with the same
-path-escape protection as the original ``app.py::safe_path``.
+result. Built-in tool groups live in :mod:`harness.tools.builtin`
+(files, shell, web); third-party plugins in :mod:`harness.tools.plugins`.
+Path containment is enforced by :class:`harness.tools.context.ToolContext`
+(the same idea as the original ``app.py::safe_path``).
 """
 
 from __future__ import annotations
@@ -40,6 +42,10 @@ class ToolRegistry:
         """Return the tool record, or None when unknown."""
         return self._tools.get(name)
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool; returns True when one was registered."""
+        return self._tools.pop(name, None) is not None
+
     def call(self, name: str, arguments: dict):
         """Invoke a tool handler. Raises KeyError for unknown tools."""
         tool = self._tools.get(name)
@@ -57,63 +63,18 @@ class ToolRegistry:
         ]
 
 
-def _make_read_file(project_root: Path):
-    def read_file(arguments: dict) -> dict:
-        rel = str(arguments.get("path", ""))
-        target = safe_path(project_root, rel)
-        if not target.is_file():
-            return {"ok": False, "error": f"Not a file: {rel!r}"}
-        try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            return {"ok": False, "error": str(exc)}
-        if len(text) > 200_000:
-            text = text[:200_000] + "\n…[truncated]"
-        return {"ok": True, "path": rel, "text": text}
-
-    return read_file
-
-
-def _make_list_dir(project_root: Path):
-    def list_dir(arguments: dict) -> dict:
-        rel = str(arguments.get("path", "."))
-        target = safe_path(project_root, rel)
-        if not target.is_dir():
-            return {"ok": False, "error": f"Not a directory: {rel!r}"}
-        try:
-            entries = sorted(
-                p.name + ("/" if p.is_dir() else "")
-                for p in target.iterdir()
-                if not p.name.startswith(".")
-            )
-        except OSError as exc:
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True, "path": rel, "entries": entries[:500]}
-
-    return list_dir
-
-
 def list_builtin_tools(project_root: str | Path) -> ToolRegistry:
-    """Registry pre-loaded with the bounded proof-of-concept tools."""
+    """Registry pre-loaded with all built-in tool groups.
+
+    Delegates to :mod:`harness.tools.builtin` (files, shell, web). The
+    two original proof-of-concept tools (``read_file`` / ``list_dir``)
+    are now the full ported versions with identical names.
+    """
+    from .builtin import register_all
+    from .context import ToolContext
+
     root = Path(project_root).expanduser()
+    ctx = ToolContext(project_root=root)
     registry = ToolRegistry()
-    registry.register(
-        "read_file",
-        "Read a UTF-8 text file inside the project root (200KB cap).",
-        {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-        },
-        _make_read_file(root),
-    )
-    registry.register(
-        "list_dir",
-        "List entries of a directory inside the project root (dotfiles hidden).",
-        {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-        },
-        _make_list_dir(root),
-    )
+    register_all(registry, ctx)
     return registry

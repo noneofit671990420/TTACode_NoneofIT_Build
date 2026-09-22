@@ -1,4 +1,4 @@
-"""Headless agent loop — skeleton (not yet implemented)."""
+"""Headless agent loop — the real tool-calling loop, ported from agent_core."""
 
 from .loop import AgentLoop
 

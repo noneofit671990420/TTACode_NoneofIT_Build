@@ -5,7 +5,7 @@ Subcommands:
 * ``init``            first-run setup: scan models, pick a default, write config
 * ``models list``     show discovered models (disk + live Ollama)
 * ``models scan``     rescan on-disk model stores and print a summary
-* ``run --headless``  resolve a model and print the plan (agent loop: roadmap)
+* ``run --headless``  run a real headless agent task (Ollama + tools)
 * ``mcp list``        list configured MCP servers
 * ``skills list``     list discovered skills
 
@@ -108,6 +108,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         "ollama_ports": [11434, 11435],
         "scanned_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    # Agent-loop tunables (backward compatible: never clobber user values).
+    # See harness/agent/loop.py for the "no artificial limits" contract.
+    config.setdefault("max_steps", 50)
+    config.setdefault("tool_output_limit", 12000)
+    config.setdefault("history_keep_turns", 20)
+    config.setdefault("context_budget_chars", 100000)
+    config.setdefault("project_root", None)
+    config.setdefault("shell_timeout", 120)
     path = save_config(config)
     print(f"Config written to {path} (re-running `harness init` is safe).")
     if not mcp_config_path().exists():
@@ -136,42 +144,110 @@ def cmd_models_scan(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    from .models.scanner import discover_all, pick_default
+def _resolve_model_url(model: str, ports: tuple[int, ...] = (11434, 11435)) -> str | None:
+    """Pick a reachable Ollama endpoint that serves ``model``.
+
+    Prefers a server whose /api/tags actually lists the model (or its
+    :latest variant); falls back to the first reachable server; None
+    when nothing answers.
+    """
+    from .models.scanner import discover_live_models
+
+    live = discover_live_models(ports)
+    for port in ports:
+        names = live.get(port, [])
+        if model in names or model + ":latest" in names or model.split(":")[0] in names:
+            return f"http://127.0.0.1:{port}"
+    for port in ports:
+        if _is_reachable(f"http://127.0.0.1:{port}"):
+            return f"http://127.0.0.1:{port}"
+    return None
+
+
+def _is_reachable(url: str) -> bool:
     from .transports.ollama import is_reachable
+
+    return is_reachable(url)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .agent.loop import AgentLoop
+    from .models.scanner import discover_all, pick_default
+    from .skills.loader import discover_skills
+    from .tools import ToolRegistry, ToolContext, load_plugins
+    from .tools.builtin import register_all
+    from .transports.ollama import OllamaTransport
 
     if not args.headless:
         print("Only --headless mode is supported by the harness CLI.", file=sys.stderr)
         return 2
 
-    models = discover_all()
-    default = pick_default(models)
-    if default is None:
+    config = load_config()
+    project = args.project or config.get("project_root") or os.getcwd()
+    project_path = Path(project).expanduser()
+    if not project_path.is_dir():
+        print(f"Error: project directory does not exist: {project}", file=sys.stderr)
+        return 1
+
+    # Model: explicit flag > config default > auto-pick from disk scan.
+    model = args.model or config.get("default_model")
+    if not model:
+        default = pick_default(discover_all())
+        if default is None:
+            print(
+                "No downloaded models found. Run `harness init` for guidance.",
+                file=sys.stderr,
+            )
+            return 1
+        model = default["name"]
+    url = _resolve_model_url(model)
+    if url is None:
         print(
-            "No downloaded models found. Run `harness init` for guidance.",
+            f"Error: no reachable Ollama server on :11434/:11435 serves {model!r}.\n"
+            "Start Ollama (`ollama serve`) and make sure the model is pulled, "
+            "then re-run. `harness models list` shows what this PC has.",
             file=sys.stderr,
         )
         return 1
 
-    # Prefer a live server that actually has the model; else disk-only note.
-    url = "http://127.0.0.1:11434"
-    route = "local (Ollama :11434)"
-    reason = f"downloaded on disk ({default['source']})"
-    if not is_reachable(url):
-        route = "disk-only (no live Ollama on :11434)"
-        reason = "model is downloaded but no Ollama server is running"
+    # Loop tunables: CLI flag > config > built-in defaults (see AgentLoop).
+    if args.max_steps is not None:
+        config["max_steps"] = args.max_steps
 
-    print("Resolved run plan:")
-    print(f"  route : {route}")
-    print(f"  model : {default['name']}")
-    print(f"  why   : {reason}")
-    print(f"  prompt: {args.prompt[:120]}")
-    print()
-    print(
-        "NOT-YET-IMPLEMENTED: the headless agent loop is scaffolded but not "
-        "wired up (see docs/harness-roadmap.md). No model was contacted and "
-        "no tools were executed."
+    ctx = ToolContext(project_root=project_path, config=config)
+    registry = ToolRegistry()
+    builtin_added = register_all(registry, ctx)
+    plugins = load_plugins(registry, ctx)
+    for failure in plugins["failed"]:
+        print(f"Warning: plugin skipped ({failure['path']}): {failure['error']}",
+              file=sys.stderr)
+
+    skills = discover_skills()
+    transport = OllamaTransport(url, model)
+    loop = AgentLoop(
+        transport=transport,
+        model=model,
+        tools=registry,
+        skills=skills,
+        config=config,
+        project_root=project_path,
+        tool_context=ctx,
     )
+    print(f"Model : {model} ({url})")
+    print(f"Project: {project_path}")
+    print(f"Tools : {len(builtin_added)} built-in"
+          + (f" + {len(plugins['loaded'])} plugin(s)" if plugins["loaded"] else "")
+          + (f", {len(skills)} skill(s)" if skills else ""))
+    print("-" * 60)
+    result = loop.run(args.prompt)
+    print()
+    print(result["result"])
+    print("-" * 60)
+    print(f"Steps: {result['steps']}  "
+          f"Tool calls: {len(result['tool_calls'])}  "
+          f"Stopped: {result['stopped_reason']}")
+    if result["stopped_reason"] == "transport_error":
+        return 1
     return 0
 
 
@@ -224,8 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan = msub.add_parser("scan", help="Rescan on-disk model stores.")
     p_scan.set_defaults(func=cmd_models_scan)
 
-    p_run = sub.add_parser("run", help="Run a headless agent task (skeleton).")
+    p_run = sub.add_parser("run", help="Run a headless agent task.")
     p_run.add_argument("--headless", action="store_true", help="Headless mode (required).")
+    p_run.add_argument("--project", default=None,
+                       help="Project directory (default: config project_root or cwd).")
+    p_run.add_argument("--model", default=None,
+                       help="Model name (default: config default_model or auto-pick).")
+    p_run.add_argument("--max-steps", type=int, default=None,
+                       help="Max agent steps (default: config max_steps, 50).")
     p_run.add_argument("prompt", help="The task prompt.")
     p_run.set_defaults(func=cmd_run)
 
