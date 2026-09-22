@@ -65,3 +65,34 @@ Original application source: MIT, see LICENSE. Dependencies retain their own lic
 
 Website: https://talktoai.org/TALKTOAIcode/
 Source/releases: https://github.com/ResearchForumOnline/TalkToAi-Code
+
+## TTACode_NoneofIT_Build fork — headless harness direction
+
+This fork adds an OpenHarness-style refactor as a new stdlib-only `harness/`
+package (branch `feature/openharness-core`). No existing files were changed.
+
+**Vision:** modular, tiny, headless, local-first AI for any system — the Qt
+desktop UI becomes an optional frontend, not a requirement.
+
+**What's in `harness/`:**
+
+- `python -m harness init` — first-run setup: scans model stores already on
+  your PC (Ollama `~/.ollama/models`, LM Studio `~/.lmstudio/models`, plus
+  live Ollama `/api/tags`), picks a sane default model for your hardware,
+  writes `~/.ttacode/config.json`. Read-only: never downloads anything.
+- `python -m harness models list` / `models scan` — show downloaded vs.
+  live-only models with sizes.
+- `python -m harness run --headless "do X"` — resolves the model/route and
+  prints the plan (agent loop is roadmap work, honestly stubbed).
+- `python -m harness mcp list` / `skills list` — MCP server configs
+  (`~/.ttacode/mcp.json`) and `SKILL.md` skill discovery. MCP transport and
+  the agent loop are skeletons raising `NotImplementedError` — see
+  `docs/harness-roadmap.md` and `docs/mcp-roadmap.md`.
+- `harness/tools/` — minimal local `ToolRegistry` (`read_file`, `list_dir`)
+  bounded to a project root with path-escape protection.
+- `harness/transports/` — thin `urllib` Ollama chat transport, no new deps.
+
+**No new dependencies.** The harness core is stdlib-only (Python 3.10+).
+Run the new tests with `python -m unittest discover -s tests -p "test_*.py"`.
+
+Roadmap: `docs/harness-roadmap.md`.
