@@ -14,7 +14,27 @@ import unittest
 from argparse import Namespace
 from unittest.mock import patch
 
-from harness.cli import build_parser, cmd_ui
+from harness.cli import build_parser, cmd_chat, cmd_ui
+
+
+class ChatCommandTests(unittest.TestCase):
+    def test_parser_wires_chat_subcommand(self):
+        args = build_parser().parse_args(["chat"])
+        self.assertIs(args.func, cmd_chat)
+
+    def test_chat_defaults(self):
+        args = build_parser().parse_args(["chat", "--model", "x:1b"])
+        self.assertEqual(args.model, "x:1b")
+        self.assertIsNone(args.project)
+        self.assertFalse(args.no_warm)
+
+    def test_run_without_headless_points_at_chat(self):
+        from harness.cli import cmd_run
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = cmd_run(Namespace(headless=False))
+        self.assertEqual(rc, 2)
+        self.assertIn("ttacode chat", err.getvalue())
 
 
 class UiCommandTests(unittest.TestCase):

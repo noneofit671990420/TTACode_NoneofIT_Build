@@ -99,6 +99,9 @@ class AgentLoop:
         self.tool_output_limit = int(self.config.get("tool_output_limit", 12_000))
         self.history_keep_turns = int(self.config.get("history_keep_turns", 20))
         self.context_budget_chars = int(self.config.get("context_budget_chars", 100_000))
+        # Persistent conversation for interactive sessions: run() resets it,
+        # chat_turn() appends to it.
+        self.messages: list[dict] = []
 
     # -- prompt -----------------------------------------------------------
     def build_system_prompt(self) -> str:
@@ -255,13 +258,48 @@ class AgentLoop:
     def run(self, prompt: str, project_root: str | Path | None = None) -> dict:
         """Run one headless task. Returns the result dict (never raises for
         model-level outcomes; transport errors become ``stopped_reason``
-        entries so the CLI can report them honestly)."""
+        entries so the CLI can report them honestly).
+
+        Resets the conversation first. For a multi-turn interactive
+        session that keeps history across turns, use :meth:`chat_turn`.
+        """
         if project_root:
             self.project_root = str(Path(project_root).expanduser().resolve())
-        messages: list[dict] = [
+        self.messages = [
             {"role": "system", "content": self.build_system_prompt()},
             {"role": "user", "content": prompt},
         ]
+        return self._turn()
+
+    def chat_turn(self, prompt: str) -> dict:
+        """One interactive turn, keeping conversation history across turns.
+
+        A failed turn (``stopped_reason == "transport_error"``) is rolled
+        back out of the history so the user can retry the same prompt
+        cleanly.
+        """
+        if not self.messages:
+            self.messages = [
+                {"role": "system", "content": self.build_system_prompt()}
+            ]
+        snapshot = len(self.messages)
+        self.messages.append({"role": "user", "content": prompt})
+        try:
+            result = self._turn()
+        except KeyboardInterrupt:
+            # Ctrl+C mid-turn: discard the partial turn, keep history.
+            del self.messages[snapshot:]
+            raise
+        if result.get("stopped_reason") == "transport_error":
+            del self.messages[snapshot:]
+        return result
+
+    def reset(self) -> None:
+        """Clear the conversation history (model, config, and tools stay)."""
+        self.messages = []
+
+    def _turn(self) -> dict:
+        """Run the step loop over ``self.messages``; see :meth:`run`."""
         known_tools = (
             {t["name"] for t in self.tools.list_tools()} if self.tools else set()
         )
@@ -273,7 +311,7 @@ class AgentLoop:
         )
 
         for step in range(1, self.max_steps + 1):
-            payload = self._prune(messages)
+            payload = self._prune(self.messages)
             try:
                 content, calls = self.transport.chat(payload, self._ollama_tools())
             except Exception as exc:
@@ -317,7 +355,7 @@ class AgentLoop:
                     }
                     for c in calls
                 ]
-            messages.append(assistant)
+            self.messages.append(assistant)
 
             if not calls:
                 if any(marker in content for marker in _MALFORMED_MARKERS):
@@ -333,7 +371,7 @@ class AgentLoop:
                             "stopped_reason": "malformed_tools",
                             "model": self.model,
                         }
-                    messages.append(
+                    self.messages.append(
                         {
                             "role": "user",
                             "content": (
@@ -352,7 +390,7 @@ class AgentLoop:
                     changed = self._changes_made() - changes_baseline
                     if changed > 0 and not verification_nudged and step < self.max_steps:
                         verification_nudged = True
-                        messages.append(
+                        self.messages.append(
                             {
                                 "role": "user",
                                 "content": (
@@ -405,7 +443,7 @@ class AgentLoop:
                     "tool_name": name,
                     "content": result_text,
                 }
-                messages.append(tool_message)
+                self.messages.append(tool_message)
 
         return {
             "result": (

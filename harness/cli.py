@@ -6,7 +6,7 @@ Subcommands:
 * ``models list``     show discovered models (disk + live Ollama)
 * ``models scan``     rescan on-disk model stores and print a summary
 * ``models warm``     pre-load a model into VRAM so the first run is fast
-* ``run --headless``  run a real headless agent task (Ollama + tools + MCP)
+* ``run --headless``  run a real headless agent task (Ollama + tools + MCP)\n* ``chat``            interactive multi-turn session (same agent, history kept)
 * ``mcp list``        list configured MCP servers (live status + tools)
 * ``mcp check``       test each MCP server (initialize + tools/list)
 * ``skills list``     list discovered skills
@@ -242,7 +242,20 @@ def cmd_models_warm(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+class _SessionError(Exception):
+    """Agent session setup failure; carries the CLI exit code."""
+
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _build_session(args: argparse.Namespace):
+    """Shared setup for ``run``/``chat``: config, model load, tools, loop.
+
+    Returns ``(loop, loaded, banner_lines)``. Raises :class:`_SessionError`
+    on setup failure (bad project dir, model load failure).
+    """
     from .agent.loop import AgentLoop
     from .mcp.bridge import mount_mcp_tools
     from .models.loader import ModelLoadError, load_model
@@ -250,29 +263,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .tools import ToolRegistry, ToolContext, load_plugins
     from .tools.builtin import register_all
 
-    if not args.headless:
-        print("The harness CLI is headless-only: ttacode run --headless \"<task>\". "
-              "The agent runs tools itself (shell, files, web, MCP); there is no "
-              "interactive mode.", file=sys.stderr)
-        return 2
-
     config = load_config()
     project = args.project or config.get("project_root") or os.getcwd()
     project_path = Path(project).expanduser()
     if not project_path.is_dir():
-        print(f"Error: project directory does not exist: {project}", file=sys.stderr)
-        return 1
+        raise _SessionError(
+            f"Error: project directory does not exist: {project_path}")
 
     # Model load: resolve → tune (num_gpu/num_ctx/keep_alive) → warm into
     # VRAM. One path for the whole CLI (see harness/models/loader.py).
     try:
         loaded = load_model(args.model, config, warm=not args.no_warm)
     except ModelLoadError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    model = loaded.name
-    url = loaded.url
-    transport = loaded.transport
+        raise _SessionError(f"Error: {exc}")
 
     # Loop tunables: CLI flag > config > built-in defaults (see AgentLoop).
     if args.max_steps is not None:
@@ -293,8 +296,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     skills = discover_skills()
     loop = AgentLoop(
-        transport=transport,
-        model=model,
+        transport=loaded.transport,
+        model=loaded.name,
         tools=registry,
         skills=skills,
         config=config,
@@ -302,8 +305,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         tool_context=ctx,
         mcp_bridge=mcp_bridge,
     )
-    print(f"Model : {model} ({url})")
-    print(f"Project: {project_path}")
     tool_bits = [f"{len(builtin_added)} built-in"]
     if plugins["loaded"]:
         tool_bits.append(f"{len(plugins['loaded'])} plugin(s)")
@@ -314,7 +315,27 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     if skills:
         tool_bits.append(f"{len(skills)} skill(s)")
-    print(f"Tools : {' + '.join(tool_bits)}")
+    banner = [
+        f"Model : {loaded.name} ({loaded.url})",
+        f"Project: {project_path}",
+        f"Tools : {' + '.join(tool_bits)}",
+    ]
+    return loop, loaded, banner
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    if not args.headless:
+        print('One-shot task: ttacode run --headless "<task>". '
+              "Interactive session: ttacode chat. "
+              "The agent runs tools itself (shell, files, web, MCP).",
+              file=sys.stderr)
+        return 2
+    try:
+        loop, _loaded, banner = _build_session(args)
+    except _SessionError as exc:
+        print(exc, file=sys.stderr)
+        return exc.code
+    print("\n".join(banner))
     print("-" * 60)
     try:
         result = loop.run(args.prompt)
@@ -328,6 +349,53 @@ def cmd_run(args: argparse.Namespace) -> int:
           f"Stopped: {result['stopped_reason']}")
     if result["stopped_reason"] == "transport_error":
         return 1
+    return 0
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    """Interactive REPL: multi-turn conversation, tools on every turn."""
+    try:
+        loop, loaded, banner = _build_session(args)
+    except _SessionError as exc:
+        print(exc, file=sys.stderr)
+        return exc.code
+    print("\n".join(banner))
+    print("Interactive mode — conversation history is kept across turns.")
+    print("Commands: /quit (or Ctrl+Z then Enter / Ctrl+D), /reset, /model")
+    print("-" * 60)
+    try:
+        while True:
+            try:
+                line = input("\n> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            text = line.strip()
+            if not text:
+                continue
+            if text in ("/quit", "/exit", "/q"):
+                break
+            if text == "/reset":
+                loop.reset()
+                print("History cleared.")
+                continue
+            if text == "/model":
+                print(f"{loaded.name} ({loaded.url})")
+                continue
+            try:
+                result = loop.chat_turn(text)
+            except KeyboardInterrupt:
+                print("\n(interrupted — turn discarded, history kept)")
+                continue
+            print()
+            print(result["result"])
+            print(f"-- steps: {result['steps']} · tool calls: "
+                  f"{len(result['tool_calls'])} · stopped: "
+                  f"{result['stopped_reason']}")
+            if result["stopped_reason"] == "transport_error":
+                print("(connection issue — history kept, retry or /quit)")
+    finally:
+        loop.close()
     return 0
 
 
@@ -474,6 +542,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Skip the automatic VRAM warm-up at model load.")
     p_run.add_argument("prompt", help="The task prompt.")
     p_run.set_defaults(func=cmd_run)
+
+    p_chat = sub.add_parser("chat", help="Interactive chat: multi-turn agent session with tools.")
+    p_chat.add_argument("--project", default=None,
+                        help="Project directory (default: config project_root or cwd).")
+    p_chat.add_argument("--model", default=None,
+                        help="Model name (default: config default_model or auto-pick).")
+    p_chat.add_argument("--max-steps", type=int, default=None,
+                        help="Max agent steps per turn (default: config max_steps, 50).")
+    p_chat.add_argument("--no-warm", action="store_true",
+                        help="Skip the automatic VRAM warm-up at model load.")
+    p_chat.set_defaults(func=cmd_chat)
 
     p_mcp = sub.add_parser("mcp", help="MCP server commands.")
     mcsub = p_mcp.add_subparsers(dest="mcp_command", required=True)

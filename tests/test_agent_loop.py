@@ -29,7 +29,7 @@ class FakeTransport:
         if not self.script:
             return "done", []
         entry = self.script.pop(0)
-        if isinstance(entry, Exception):
+        if isinstance(entry, BaseException):
             raise entry
         content, calls = entry
         return content, calls
@@ -295,6 +295,76 @@ class TestSkillsAndVerification(unittest.TestCase):
         result = loop.run("hi")
         self.assertEqual(result["stopped_reason"], "final_answer")
         self.assertEqual(len(transport.payloads), 1)
+
+
+class TestChatTurn(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        (Path(self.tmp.name) / "hello.txt").write_text("hello world")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_history_kept_across_turns(self):
+        script = [("first answer", []), ("second answer", [])]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        r1 = loop.chat_turn("hello")
+        self.assertEqual(r1["result"], "first answer")
+        r2 = loop.chat_turn("and then?")
+        self.assertEqual(r2["result"], "second answer")
+        second_payload = transport.payloads[1]
+        seen = {(m["role"], m.get("content", "")) for m in second_payload}
+        self.assertIn(("user", "hello"), seen)
+        self.assertIn(("assistant", "first answer"), seen)
+        self.assertIn(("user", "and then?"), seen)
+
+    def test_transport_error_rolls_back_failed_turn(self):
+        script = [("ok", []), RuntimeError("boom")]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        loop.chat_turn("first")
+        before = len(loop.messages)
+        result = loop.chat_turn("second")
+        self.assertEqual(result["stopped_reason"], "transport_error")
+        self.assertEqual(len(loop.messages), before)
+        # Retry after the rollback works.
+        retry = loop.chat_turn("second again")
+        self.assertEqual(retry["stopped_reason"], "final_answer")
+
+    def test_run_resets_history(self):
+        script = [("a1", []), ("a2", [])]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        loop.chat_turn("one")
+        self.assertGreater(len(loop.messages), 2)
+        result = loop.run("fresh task")
+        self.assertEqual(result["result"], "a2")
+        # system + new user + assistant only
+        self.assertEqual(len(loop.messages), 3)
+
+    def test_reset_clears_history(self):
+        script = [("a1", []), ("a2", [])]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        loop.chat_turn("one")
+        loop.reset()
+        self.assertEqual(loop.messages, [])
+        result = loop.chat_turn("two")
+        self.assertEqual(result["result"], "a2")
+        first_payload = transport.payloads[1]
+        self.assertEqual(
+            [m["role"] for m in first_payload], ["system", "user"]
+        )
+
+
+    def test_keyboard_interrupt_discards_partial_turn(self):
+        script = [("a1", []), KeyboardInterrupt()]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        loop.chat_turn("one")
+        before = len(loop.messages)
+        with self.assertRaises(KeyboardInterrupt):
+            loop.chat_turn("two")
+        self.assertEqual(len(loop.messages), before)
+        # Session still usable afterwards.
+        result = loop.chat_turn("three")
+        self.assertEqual(result["stopped_reason"], "final_answer")
 
 
 if __name__ == "__main__":
