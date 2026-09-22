@@ -3,7 +3,8 @@
     One-shot build of the TalkToAi Code Studio UI into dist\ttacode-studio.exe.
 
 .DESCRIPTION
-    Checks for Python 3.10+, creates a disposable build venv
+    Checks for a compatible Python (3.10 through 3.13 - PySide6 6.8.3 has
+    no wheels for Python 3.14), creates a disposable build venv
     (.build-studio-venv), installs PyInstaller and PySide6 6.8.3, runs
     PyInstaller on ttacode-studio.spec, then smoke-tests the resulting
     binary. Idempotent: re-running reuses the venv and overwrites dist\.
@@ -26,26 +27,59 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 if (-not (Test-Path "ttacode-studio.spec")) { Fail "ttacode-studio.spec not found - run from the repo root." }
 
-# --- Python 3.10+ ---------------------------------------------------------
-$Py = $null
-foreach ($cmd in @("py", "python", "python3")) {
-    $found = Get-Command $cmd -ErrorAction SilentlyContinue
-    if ($found) { $Py = $found.Source; break }
+# --- Python 3.10 through 3.13 ------------------------------------------------
+# PySide6 6.8.3 ships no wheels for Python 3.14, so the interpreter must be
+# in [3.10, 3.14). Preference order: the actions/setup-python pin
+# ($env:pythonLocation), then the newest compatible interpreter via the
+# py launcher, then whatever py/python/python3 resolves to on PATH.
+function Get-PyVersion {
+    param([string]$exe, [string[]]$argv = @())
+    try {
+        $o = & $exe @argv -c "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))" 2>$null
+        if ($o) { return [version]$o.Trim() }
+    } catch { }
+    return $null
 }
-if (-not $Py) { Fail "No Python found. Install Python 3.10+ from https://www.python.org/downloads/ and re-run." }
+function Test-PyOk($v) { return ($v -and $v -ge [version]"3.10" -and $v -lt [version]"3.14") }
 
-$verOut = & $Py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
-if (-not $verOut) { Fail "Could not query the Python version." }
-$ver = [version]$verOut
-if ($ver -lt [version]"3.10") { Fail "Python 3.10+ required, found $verOut." }
-Write-Host "Using Python $verOut ($Py)"
+$Py = $null
+$PyArgv = @()
+if ($env:pythonLocation) {
+    $pin = Join-Path $env:pythonLocation "python.exe"
+    if ((Test-Path $pin) -and (Test-PyOk (Get-PyVersion $pin))) { $Py = $pin }
+}
+if (-not $Py) {
+    $launcher = (Get-Command "py" -ErrorAction SilentlyContinue)
+    if ($launcher) {
+        foreach ($mm in @("3.13", "3.12", "3.11", "3.10")) {
+            $argv = @("-$mm")
+            if (Test-PyOk (Get-PyVersion $launcher.Source $argv)) { $Py = $launcher.Source; $PyArgv = $argv; break }
+        }
+    }
+}
+if (-not $Py) {
+    foreach ($cmd in @("py", "python", "python3")) {
+        $found = Get-Command $cmd -ErrorAction SilentlyContinue
+        if ($found -and (Test-PyOk (Get-PyVersion $found.Source))) { $Py = $found.Source; break }
+    }
+}
+if (-not $Py) { Fail "Need a 64-bit Python 3.10 through 3.13. PySide6 6.8.3 has no wheels for Python 3.14+. Install Python 3.12 from https://www.python.org/downloads/ and re-run." }
+
+$verOut = (Get-PyVersion $Py $PyArgv).ToString()
+Write-Host "Using Python $verOut ($Py $PyArgv)"
 
 # --- build venv -----------------------------------------------------------
 $Venv = Join-Path $Root ".build-studio-venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
-if (-not (Test-Path $VenvPy)) {
+$venvVer = $null
+if (Test-Path $VenvPy) { $venvVer = Get-PyVersion $VenvPy }
+if (-not (Test-PyOk $venvVer)) {
+    if (Test-Path $Venv) {
+        Write-Host "Removing stale or incompatible build venv ..."
+        Remove-Item -Recurse -Force $Venv
+    }
     Write-Host "Creating build venv at .build-studio-venv ..."
-    & $Py -m venv $Venv
+    & $Py @PyArgv -m venv $Venv
     if (-not (Test-Path $VenvPy)) { Fail "venv creation failed." }
 } else {
     Write-Host "Reusing existing .build-studio-venv."
