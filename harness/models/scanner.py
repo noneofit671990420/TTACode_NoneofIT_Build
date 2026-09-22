@@ -112,6 +112,7 @@ def _scan_ollama_store(store: Path) -> list[dict]:
                 {
                     "name": name,
                     "source": "disk",
+                    "store": "ollama",
                     "size_bytes": size if seen else None,
                     "path": str(store),
                 }
@@ -119,8 +120,18 @@ def _scan_ollama_store(store: Path) -> list[dict]:
     return results
 
 
+# Filename fragments that are *not* loadable language models, even though
+# they live in model stores (e.g. vision projector weights shipped next
+# to the LLM). Matching is case-insensitive and substring-based.
+_NON_MODEL_FRAGMENTS = ("mmproj",)
+
+
 def _scan_lmstudio_store(store: Path) -> list[dict]:
-    """Recursively find model weight files in an LM Studio-style store."""
+    """Recursively find model weight files in an LM Studio-style store.
+
+    Skips non-model artifacts such as ``mmproj`` vision projectors —
+    they are not loadable LLMs and must never become default picks.
+    """
     results: list[dict] = []
     try:
         candidates = list(store.rglob("*"))
@@ -131,6 +142,9 @@ def _scan_lmstudio_store(store: Path) -> list[dict]:
             continue
         if path.suffix.lower() not in _GGUF_EXTENSIONS:
             continue
+        lowered = path.name.lower()
+        if any(frag in lowered for frag in _NON_MODEL_FRAGMENTS):
+            continue
         try:
             rel = path.relative_to(store)
         except ValueError:
@@ -140,6 +154,7 @@ def _scan_lmstudio_store(store: Path) -> list[dict]:
             {
                 "name": name,
                 "source": "disk",
+                "store": "lmstudio",
                 "size_bytes": _safe_stat_size(path),
                 "path": str(path),
             }
@@ -250,17 +265,45 @@ def _capability_score(name: str) -> int:
         score -= 2  # probably too heavy to be a *default* on unknown hardware
     if "embed" in lowered:
         score -= 10  # embedding models cannot chat
+    if "mmproj" in lowered:
+        score -= 10  # vision projector, not a loadable LLM (belt & braces;
+        # the LM Studio scanner already filters these out)
     return score
 
 
-def pick_default(models: list[dict], vram_gb: float | None = None) -> dict | None:
+def is_ollama_servable(record: dict) -> bool:
+    """Can the Ollama transport serve this discovery record?
+
+    The harness only speaks the Ollama API, so a default pick must be a
+    model an Ollama server can actually load: one it already serves
+    (``source`` ``"both"``/``"live"``), or one sitting in Ollama's own
+    blob store (``source == "disk"`` with ``store == "ollama"`` — it
+    becomes servable as soon as ``ollama serve`` runs). A bare GGUF in
+    the LM Studio folder is *not* servable until imported with
+    ``ollama create``.
+    """
+    source = record.get("source")
+    if source in ("both", "live"):
+        return True
+    # Records predating the "store" key came from the Ollama scanner.
+    return source == "disk" and record.get("store", "ollama") == "ollama"
+
+
+def pick_default(
+    models: list[dict],
+    vram_gb: float | None = None,
+    transport: str = "ollama",
+) -> dict | None:
     """Pick a sane default model from discovered models.
 
     Heuristic (documented, deterministic):
 
-    1. Consider only downloaded models (``source`` is ``"disk"`` or
-       ``"both"``) — a default must work offline with zero downloads.
-    2. When ``vram_gb`` is given, prefer downloaded models whose known
+    1. Consider only models the active transport can serve
+       (:func:`is_ollama_servable` for ``transport="ollama"``) — a
+       default must actually load, not just exist on disk. A bare GGUF
+       in the LM Studio folder is skipped here; import it with
+       ``ollama create`` to make it eligible.
+    2. When ``vram_gb`` is given, prefer servable models whose known
        size fits in 90% of VRAM (headroom for context/KV cache plus OS
        overhead). A model that fits fully in VRAM is dramatically faster
        than one spilling to system RAM, so fit wins over raw capability.
@@ -271,14 +314,18 @@ def pick_default(models: list[dict], vram_gb: float | None = None) -> dict | Non
     5. Final tie-break: alphabetical name, so the choice is stable.
 
     If nothing fits the VRAM budget, the heuristic falls back to the
-    plain ranking over all downloaded models (smallest capable first) —
+    plain ranking over all servable models (smallest capable first) —
     callers should warn that CPU spill is expected (see
     ``harness.models.loader``).
 
-    Returns the winning record, or ``None`` when nothing is downloaded.
+    Returns the winning record, or ``None`` when nothing servable is
+    downloaded.
     """
-    downloaded = [m for m in models if m.get("source") in ("disk", "both")]
-    if not downloaded:
+    if transport == "ollama":
+        candidates = [m for m in models if is_ollama_servable(m)]
+    else:
+        candidates = [m for m in models if m.get("source") in ("disk", "both")]
+    if not candidates:
         return None
 
     def rank(record: dict) -> tuple:
@@ -290,7 +337,7 @@ def pick_default(models: list[dict], vram_gb: float | None = None) -> dict | Non
     if vram_gb is not None and vram_gb > 0:
         budget_bytes = int(vram_gb * 0.9 * (1024**3))
         fits = [
-            m for m in downloaded
+            m for m in candidates
             if isinstance(m.get("size_bytes"), int)
             and m["size_bytes"] <= budget_bytes
         ]
@@ -299,4 +346,4 @@ def pick_default(models: list[dict], vram_gb: float | None = None) -> dict | Non
         # Nothing fits: fall through to the plain ranking; the caller
         # warns about expected CPU spill.
 
-    return sorted(downloaded, key=rank)[0]
+    return sorted(candidates, key=rank)[0]

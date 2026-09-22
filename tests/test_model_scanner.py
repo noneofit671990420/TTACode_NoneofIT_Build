@@ -11,6 +11,7 @@ from harness.models.scanner import (
     discover_all,
     discover_disk_models,
     discover_live_models,
+    is_ollama_servable,
     pick_default,
 )
 
@@ -132,12 +133,25 @@ class TestDiscoverAll(unittest.TestCase):
 
 
 class TestPickDefault(unittest.TestCase):
-    def _rec(self, name, source="disk", size=1000):
-        return {"name": name, "source": source, "size_bytes": size, "path": None}
+    def _rec(self, name, source="disk", size=1000, store="ollama"):
+        rec = {"name": name, "source": source, "size_bytes": size, "path": None}
+        if source == "disk":
+            rec["store"] = store
+        return rec
 
-    def test_none_when_nothing_downloaded(self):
+    def test_none_when_nothing_servable(self):
         self.assertIsNone(pick_default([]))
-        self.assertIsNone(pick_default([self._rec("x:1b", source="live")]))
+        # Bare LM Studio GGUFs are not servable by the Ollama transport.
+        self.assertIsNone(
+            pick_default([self._rec("author/model-q4_k_m", store="lmstudio")])
+        )
+
+    def test_live_models_are_servable(self):
+        # A model Ollama is already serving is the most loadable thing
+        # there is — the old "live is never a default" rule is gone.
+        self.assertEqual(
+            pick_default([self._rec("x:1b", source="live")])["name"], "x:1b"
+        )
 
     def test_prefers_instruct_over_plain(self):
         models = [self._rec("plain-8b"), self._rec("qwen3-instruct-4b")]
@@ -155,9 +169,53 @@ class TestPickDefault(unittest.TestCase):
         models = [self._rec("nomic-embed-text"), self._rec("qwen3-4b-instruct")]
         self.assertEqual(pick_default(models)["name"], "qwen3-4b-instruct")
 
-    def test_live_only_models_ignored(self):
-        models = [self._rec("fancy:70b", source="live"), self._rec("tiny:1b", source="disk")]
+    def test_lmstudio_disk_skipped_for_ollama_servable(self):
+        models = [
+            self._rec("author/big-q4_k_m", store="lmstudio", size=500),
+            self._rec("tiny:1b", size=9000),
+        ]
         self.assertEqual(pick_default(models)["name"], "tiny:1b")
+
+    def test_mmproj_never_picked(self):
+        models = [
+            self._rec("author/mmproj-model-F16", size=100),
+            self._rec("qwen3-4b", size=9000),
+        ]
+        self.assertEqual(pick_default(models)["name"], "qwen3-4b")
+
+    def test_legacy_disk_records_still_servable(self):
+        # Records predating the "store" key came from the Ollama scanner.
+        rec = {"name": "old:1b", "source": "disk", "size_bytes": 100, "path": None}
+        self.assertTrue(is_ollama_servable(rec))
+        self.assertEqual(pick_default([rec])["name"], "old:1b")
+
+
+class TestIsOllamaServable(unittest.TestCase):
+    def test_servable_sources(self):
+        self.assertTrue(is_ollama_servable({"source": "both"}))
+        self.assertTrue(is_ollama_servable({"source": "live"}))
+        self.assertTrue(
+            is_ollama_servable({"source": "disk", "store": "ollama"})
+        )
+        self.assertFalse(
+            is_ollama_servable({"source": "disk", "store": "lmstudio"})
+        )
+
+
+class TestLmStudioScanFilters(unittest.TestCase):
+    def test_mmproj_files_skipped(self):
+        import tempfile
+        from pathlib import Path
+        from harness.models import scanner as mod
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp)
+            (store / "author").mkdir()
+            (store / "author" / "model-Q4_K_M.gguf").write_bytes(b"x" * 16)
+            (store / "author" / "mmproj-model-F16.gguf").write_bytes(b"x" * 16)
+            results = mod._scan_lmstudio_store(store)
+        names = [r["name"] for r in results]
+        self.assertEqual(names, ["author/model-Q4_K_M"])
+        self.assertEqual(results[0]["store"], "lmstudio")
 
 
 if __name__ == "__main__":

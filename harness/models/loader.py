@@ -16,7 +16,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .scanner import discover_all, discover_live_models, pick_default
+from .scanner import discover_all, discover_live_models, is_ollama_servable, pick_default
 from ..transports.ollama import OllamaTransport, is_reachable
 
 _GIB = 1024**3
@@ -159,12 +159,37 @@ def load_model(
                 f"Model {name!r} is not on this PC.{hint} "
                 "Pull it with `ollama pull <name>` or run `harness models list`."
             )
+        if not is_ollama_servable(record):
+            # A bare GGUF in the LM Studio folder: Ollama can't serve it
+            # until it's imported. Fail fast with the fix, instead of a
+            # cryptic 404 halfway through the run.
+            path = record.get("path") or "<path>"
+            raise ModelLoadError(
+                f"Model {record['name']!r} is an LM Studio file that Ollama "
+                "does not serve. Import it first:\n"
+                f"  ollama create {record['name'].split('/')[-1]} -f - <<'EOF'\n"
+                f"  FROM {path}\n"
+                "  EOF\n"
+                "then re-run. (Ollama only serves models in its own store.)"
+            )
     else:
         record = pick_default(models, vram_gb=vram_gb)
         if record is None:
+            lm_files = sum(
+                1 for m in models
+                if m.get("source") == "disk" and m.get("store") == "lmstudio"
+            )
+            extra = (
+                f" You have {lm_files} LM Studio GGUF file(s) on disk — "
+                "import one with `ollama create <name> -f Modelfile` "
+                "(Modelfile line: `FROM <path-to-gguf>`) to make it usable."
+                if lm_files else ""
+            )
             raise ModelLoadError(
-                "No downloaded models found. Run `harness init` for guidance — "
-                "it never downloads anything itself."
+                "No Ollama-servable models found. "
+                "`ollama pull qwen2.5-coder:7b` (or any model) makes one "
+                "available; `harness init` never downloads anything itself."
+                + extra
             )
     model_name = record["name"]
 

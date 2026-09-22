@@ -101,6 +101,12 @@ def _print_models(models: list[dict], vram_gb: float | None = None) -> None:
     if fit_col:
         print("FIT: ✓ fits VRAM budget (90%) · ! exceeds budget, expect CPU spill · "
               "? size unknown")
+    lm_only = [m for m in models
+               if m.get("source") == "disk" and m.get("store") == "lmstudio"]
+    if lm_only:
+        print("Note: LM Studio 'disk' files are not served by Ollama — import one with "
+              "`ollama create <name> -f Modelfile` (with a `FROM <path-to-gguf>` line) "
+              "to make it usable.")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -128,11 +134,24 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     default = pick_default(models, vram_gb=vram_gb)
     if default is None:
-        print(
-            "No downloaded models found. Install Ollama and pull a model, e.g.\n"
-            "  ollama pull qwen3.5:4b\n"
-            "then re-run `harness init`. Nothing was downloaded by this command."
+        lm_count = sum(
+            1 for m in models
+            if m.get("source") == "disk" and m.get("store") == "lmstudio"
         )
+        if lm_count:
+            print(
+                f"Found {lm_count} LM Studio file(s), but no model Ollama can serve. "
+                "Import one into Ollama, e.g.\n"
+                "  ollama create mymodel -f Modelfile   # Modelfile: FROM <path-to-gguf>\n"
+                "or pull a ready model with `ollama pull qwen2.5-coder:7b`,\n"
+                "then re-run `harness init`. Nothing was downloaded by this command."
+            )
+        else:
+            print(
+                "No downloaded models found. Install Ollama and pull a model, e.g.\n"
+                "  ollama pull qwen2.5-coder:7b\n"
+                "then re-run `harness init`. Nothing was downloaded by this command."
+            )
         # Still persist the (possibly empty) config so init is idempotent.
         config.setdefault("default_model", None)
     else:

@@ -73,8 +73,16 @@ class TestVramAwarePick(unittest.TestCase):
         winner = pick_default(models)
         self.assertEqual(winner["name"], "qwen3:32b-instruct")
 
-    def test_none_when_nothing_downloaded(self):
-        self.assertIsNone(pick_default([_m("x", source="live")], vram_gb=8.0))
+    def test_none_when_nothing_servable(self):
+        self.assertIsNone(pick_default([], vram_gb=8.0))
+        lm = _m("author/m-q4_k_m", size=int(4 * GIB))
+        lm["store"] = "lmstudio"
+        self.assertIsNone(pick_default([lm], vram_gb=8.0))
+
+    def test_live_model_is_servable_pick(self):
+        self.assertEqual(
+            pick_default([_m("x", source="live")], vram_gb=8.0)["name"], "x"
+        )
 
     def test_budget_is_90_percent(self):
         self.assertEqual(vram_budget_bytes(8.0), int(7.2 * GIB))
@@ -164,6 +172,26 @@ class TestLoadModel(unittest.TestCase):
     def test_explicit_unknown_model_raises_honestly(self):
         with self.assertRaises(ModelLoadError):
             load_model("does-not-exist:99b", {}, out=self.quiet)
+
+    def test_explicit_lmstudio_disk_model_fails_fast_with_create_guidance(self):
+        lm = _m("author/model-q4_k_m", size=int(4.7 * GIB))
+        lm["store"] = "lmstudio"
+        lm["path"] = "/models/model.gguf"
+        with mock.patch.object(loader, "discover_all", return_value=self.models + [lm]):
+            with self.assertRaises(ModelLoadError) as ctx:
+                load_model("author/model-q4_k_m", {}, out=self.quiet)
+        self.assertIn("ollama create", str(ctx.exception))
+
+    def test_auto_pick_with_only_lmstudio_models_suggests_import(self):
+        lm = _m("author/model-q4_k_m", size=int(4.7 * GIB))
+        lm["store"] = "lmstudio"
+        lm["path"] = "/models/model.gguf"
+        with mock.patch.object(loader, "discover_all", return_value=[lm]):
+            with self.assertRaises(ModelLoadError) as ctx:
+                load_model(None, {"vram_gb": 8.0}, out=self.quiet)
+        msg = str(ctx.exception)
+        self.assertIn("ollama create", msg)
+        self.assertIn("ollama pull", msg)
 
     def test_no_models_raises_honestly(self):
         with mock.patch.object(loader, "discover_all", return_value=[]):
