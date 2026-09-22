@@ -289,6 +289,37 @@ def is_ollama_servable(record: dict) -> bool:
     return source == "disk" and record.get("store", "ollama") == "ollama"
 
 
+# Default vision model offered by the GUI's one-click installer.
+# A config ``vision_model`` value overrides this for power users.
+DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
+
+_VISION_MARKERS = (
+    "llava",
+    "bakllava",
+    "moondream",
+    "minicpm-v",
+    "cogvlm",
+    "vision",
+    "-vl",
+    "vl:",
+    "_vl",
+    "qwen2-vl",
+    "qwen2.5vl",
+    "qwen-vl",
+)
+
+
+def is_vision_model(name: str) -> bool:
+    """Heuristic: does this model name look vision-capable?
+
+    Ollama exposes no capability flags, so we match known vision
+    families/markers in the name. Conservative on purpose — a miss just
+    means the GUI tries the request and reports Ollama's honest error.
+    """
+    lowered = (name or "").lower()
+    return any(marker in lowered for marker in _VISION_MARKERS)
+
+
 def pick_default(
     models: list[dict],
     vram_gb: float | None = None,

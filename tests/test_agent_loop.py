@@ -366,6 +366,22 @@ class TestChatTurn(unittest.TestCase):
         result = loop.chat_turn("three")
         self.assertEqual(result["stopped_reason"], "final_answer")
 
+    def test_chat_turn_attaches_images(self):
+        script = [("I see a cat.", [])]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        result = loop.chat_turn("what is this?", images=["aGVsbG8="])
+        self.assertEqual(result["stopped_reason"], "final_answer")
+        user_message = transport.payloads[0][1]
+        self.assertEqual(user_message["role"], "user")
+        self.assertEqual(user_message["images"], ["aGVsbG8="])
+
+    def test_chat_turn_without_images_has_no_images_key(self):
+        script = [("hi", [])]
+        loop, transport, ctx, registry = _make_loop(self.tmp.name, script)
+        loop.chat_turn("hello")
+        user_message = transport.payloads[0][1]
+        self.assertNotIn("images", user_message)
+
 
 if __name__ == "__main__":
     unittest.main()

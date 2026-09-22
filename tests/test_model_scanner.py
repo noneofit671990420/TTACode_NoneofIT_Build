@@ -12,6 +12,7 @@ from harness.models.scanner import (
     discover_disk_models,
     discover_live_models,
     is_ollama_servable,
+    is_vision_model,
     pick_default,
 )
 
@@ -200,6 +201,30 @@ class TestIsOllamaServable(unittest.TestCase):
         self.assertFalse(
             is_ollama_servable({"source": "disk", "store": "lmstudio"})
         )
+
+
+class TestIsVisionModel(unittest.TestCase):
+    def test_known_vision_families(self):
+        for name in (
+            "llava:7b",
+            "qwen2.5vl:7b",
+            "qwen2-vl:7b",
+            "moondream",
+            "bakllava:7b",
+            "llama3.2-vision:11b",
+            "minicpm-v:8b",
+        ):
+            self.assertTrue(is_vision_model(name), name)
+
+    def test_non_vision_models(self):
+        for name in (
+            "qwen2.5-coder:7b",
+            "llama3.1:8b",
+            "phi4:14b",
+            "nomic-embed-text",
+            "",
+        ):
+            self.assertFalse(is_vision_model(name), name)
 
 
 class TestLmStudioScanFilters(unittest.TestCase):

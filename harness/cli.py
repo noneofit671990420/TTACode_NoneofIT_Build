@@ -11,7 +11,7 @@ Subcommands:
 * ``mcp check``       test each MCP server (initialize + tools/list)
 * ``skills list``     list discovered skills
 * ``ui``              launch the Qt Studio desktop UI (source: needs
-                      PySide6; frozen ttacode.exe points at ttacode-studio.exe)
+                      PySide6; frozen builds point at the ttacode.exe GUI release asset)
 
 Config lives at ``~/.ttacode/config.json``
 (``%USERPROFILE%\\.ttacode\\config.json`` on Windows).
@@ -253,74 +253,33 @@ class _SessionError(Exception):
 def _build_session(args: argparse.Namespace):
     """Shared setup for ``run``/``chat``: config, model load, tools, loop.
 
-    Returns ``(loop, loaded, banner_lines)``. Raises :class:`_SessionError`
-    on setup failure (bad project dir, model load failure).
+    Thin wrapper over :func:`harness.session.build_session` that prints
+    warnings and returns ``(loop, loaded, banner_lines)``.
+    Raises :class:`_SessionError` on setup failure (bad project dir,
+    model load failure).
     """
-    from .agent.loop import AgentLoop
-    from .mcp.bridge import mount_mcp_tools
-    from .models.loader import ModelLoadError, load_model
-    from .skills.loader import discover_skills
-    from .tools import ToolRegistry, ToolContext, load_plugins
-    from .tools.builtin import register_all
+    from .models.loader import ModelLoadError
+    from .session import SessionError, build_session
 
     config = load_config()
-    project = args.project or config.get("project_root") or os.getcwd()
-    project_path = Path(project).expanduser()
-    if not project_path.is_dir():
-        raise _SessionError(
-            f"Error: project directory does not exist: {project_path}")
-
-    # Model load: resolve → tune (num_gpu/num_ctx/keep_alive) → warm into
-    # VRAM. One path for the whole CLI (see harness/models/loader.py).
     try:
-        loaded = load_model(args.model, config, warm=not args.no_warm)
-    except ModelLoadError as exc:
-        raise _SessionError(f"Error: {exc}")
-
-    # Loop tunables: CLI flag > config > built-in defaults (see AgentLoop).
-    if args.max_steps is not None:
-        config["max_steps"] = args.max_steps
-
-    ctx = ToolContext(project_root=project_path, config=config)
-    registry = ToolRegistry()
-    builtin_added = register_all(registry, ctx)
-    plugins = load_plugins(registry, ctx)
-    for failure in plugins["failed"]:
-        print(f"Warning: plugin skipped ({failure['path']}): {failure['error']}",
-              file=sys.stderr)
-    # MCP servers: dead ones are warned about and skipped — never fatal.
-    mcp_bridge = mount_mcp_tools(registry, ctx)
-    for failure in mcp_bridge.failed:
-        print(f"Warning: MCP server {failure['name']!r} skipped: {failure['error']}",
-              file=sys.stderr)
-
-    skills = discover_skills()
-    loop = AgentLoop(
-        transport=loaded.transport,
-        model=loaded.name,
-        tools=registry,
-        skills=skills,
-        config=config,
-        project_root=project_path,
-        tool_context=ctx,
-        mcp_bridge=mcp_bridge,
-    )
-    tool_bits = [f"{len(builtin_added)} built-in"]
-    if plugins["loaded"]:
-        tool_bits.append(f"{len(plugins['loaded'])} plugin(s)")
-    if mcp_bridge.tool_count:
-        tool_bits.append(
-            f"{mcp_bridge.tool_count} MCP tool(s) "
-            f"from {mcp_bridge.server_count} server(s)"
+        session = build_session(
+            model=args.model,
+            project=args.project,
+            max_steps=args.max_steps,
+            warm=not args.no_warm,
+            config=config,
         )
-    if skills:
-        tool_bits.append(f"{len(skills)} skill(s)")
+    except (SessionError, ModelLoadError) as exc:
+        raise _SessionError(f"Error: {exc}")
+    for warning in session.warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
     banner = [
-        f"Model : {loaded.name} ({loaded.url})",
-        f"Project: {project_path}",
-        f"Tools : {' + '.join(tool_bits)}",
+        f"Model : {session.loaded.name} ({session.loaded.url})",
+        f"Project: {session.project_path}",
+        f"Tools : {session.tool_summary}",
     ]
-    return loop, loaded, banner
+    return session.loop, session.loaded, banner
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -475,19 +434,19 @@ def cmd_skills_list(args: argparse.Namespace) -> int:
 
 
 def cmd_ui(args: argparse.Namespace) -> int:
-    """Launch the Qt Studio desktop UI.
+    """Launch the Qt Studio desktop UI (developer/legacy entry).
 
     From source (``python -m harness ui``) this imports the repo-root
-    ``studio`` module and runs its ``__main__`` block. The frozen
-    ``ttacode(.exe)`` console build does not bundle Qt, so it points at
-    the separate ``ttacode-studio.exe`` release asset instead.
+    ``studio`` module and runs its ``__main__`` block. Frozen console
+    builds do not bundle Qt, so they point at the ``ttacode.exe``
+    desktop release asset instead.
     """
     if getattr(sys, "frozen", False):
         print(
-            "The Studio UI is not bundled into ttacode(.exe) — it ships "
-            "separately as ttacode-studio.exe:\n"
+            "Qt is not bundled into this console build — the TTACode "
+            "desktop app ships separately as ttacode.exe:\n"
             "https://github.com/noneofit671990420/TTACode_NoneofIT_Build"
-            "/releases/latest/download/ttacode-studio.exe",
+            "/releases/latest/download/ttacode.exe",
             file=sys.stderr,
         )
         return 2
@@ -505,6 +464,35 @@ def cmd_ui(args: argparse.Namespace) -> int:
     import runpy
     runpy.run_module("studio", run_name="__main__")
     return 0
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    """Launch the TTACode desktop chat GUI.
+
+    From source: ``python -m harness gui``. The frozen ``ttacode.exe``
+    *is* this GUI (windowed build); the frozen ``ttacode-cli.exe``
+    console build does not bundle Qt and points at it instead.
+    """
+    if getattr(sys, "frozen", False):
+        print(
+            "The TTACode desktop app is ttacode.exe (this is the "
+            "headless ttacode-cli build):\n"
+            "https://github.com/noneofit671990420/TTACode_NoneofIT_Build"
+            "/releases/latest/download/ttacode.exe",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        from .gui.app import main as gui_main
+    except ImportError:
+        print(
+            "The desktop GUI needs Qt, which is not installed here.\n"
+            "Install it with:  pip install PySide6==6.8.3, then re-run "
+            "`harness gui`.",
+            file=sys.stderr,
+        )
+        return 1
+    return gui_main()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -568,9 +556,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ui = sub.add_parser(
         "ui",
-        help="Launch the Qt Studio desktop UI (needs PySide6; frozen builds point at ttacode-studio.exe).",
+        help="Launch the Qt Studio desktop UI (needs PySide6; frozen builds point at the ttacode.exe GUI).",
     )
     p_ui.set_defaults(func=cmd_ui)
+
+    p_gui = sub.add_parser(
+        "gui",
+        help="Launch the TTACode desktop chat GUI (ttacode.exe).",
+    )
+    p_gui.set_defaults(func=cmd_gui)
 
     return parser
 

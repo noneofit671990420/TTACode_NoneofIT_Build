@@ -1,7 +1,7 @@
 """Bridge between the Qt Studio UI and the headless harness.
 
 Stdlib-only, **no Qt imports** — safe to import from ``studio.py`` at
-module load time and to bundle into the frozen ``ttacode-studio.exe``.
+module load time and used by the Studio UI (and available to any frozen bundle).
 Never imports ``studio.py`` (no import cycles).
 
 Behavior contract

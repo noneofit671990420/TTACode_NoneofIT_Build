@@ -88,9 +88,26 @@ class TestPackagingGuards(unittest.TestCase):
         self.assertTrue(spec.is_file(), "ttacode.spec missing from repo root")
         text = spec.read_text(encoding="utf-8")
         self.assertIn("harness/__main__.py", text.replace("\\", "/"))
-        self.assertIn("ttacode", text)
+        self.assertIn("ttacode-cli", text)
         for banned in ("PySide6", "PyQt5", "PyQt6"):
             self.assertIn(banned, text, f"spec should exclude {banned}")
+
+    def test_gui_spec_file_exists_and_is_sane(self):
+        spec = REPO_ROOT / "ttacode-gui.spec"
+        self.assertTrue(spec.is_file(), "ttacode-gui.spec missing from repo root")
+        text = spec.read_text(encoding="utf-8")
+        self.assertIn("harness/gui/app.py", text.replace("\\", "/"))
+        self.assertIn('name="ttacode"', text)
+        self.assertIn("console=False", text)
+        self.assertIn("harness.gui.main_window", text)
+        # The GUI build must bundle Qt — the excludes list must not
+        # mention it (comments don't count).
+        excludes_block = text[text.index("excludes=["): text.index("noarchive=False")]
+        code_only = "\n".join(
+            line.split("#", 1)[0] for line in excludes_block.splitlines()
+        )
+        for banned in ("PySide6", "PyQt5", "PyQt6"):
+            self.assertNotIn(banned, code_only)
 
 
 if __name__ == "__main__":

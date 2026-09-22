@@ -1,9 +1,12 @@
-# Build the headless harness Windows .exe and attach it to a GitHub Release.
+# Build the TTACode Windows launchers and attach them to a GitHub Release.
 #
-# Triggers: pushing a tag like v0.2.0, or manually via "Run workflow".
-# The authoritative ttacode.exe is built here on windows-latest — never
-# cross-compiled from Linux. The release is created if the tag has none;
-# otherwise the exe is uploaded to the existing release.
+# Two launchers, built here on windows-latest — never cross-compiled
+# from Linux:
+#   dist/ttacode.exe      the desktop chat GUI (windowed, average users)
+#   dist/ttacode-cli.exe  the headless harness CLI (console, power users)
+# Triggers: pushing a tag like v0.3.0, or manually via "Run workflow".
+# The release is created if the tag has none; otherwise the exes are
+# uploaded to the existing release.
 
 name: Build Windows exe
 
@@ -17,7 +20,7 @@ permissions:
   contents: write
 
 jobs:
-  build-exe:
+  build-gui:
     runs-on: windows-latest
     steps:
       - name: Check out
@@ -28,9 +31,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build ttacode.exe
+      - name: Build ttacode.exe (desktop GUI)
         shell: powershell
-        run: .\build\build-exe.ps1
+        run: .\build\build-gui.ps1
 
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -38,7 +41,7 @@ jobs:
           files: dist/ttacode.exe
           generate_release_notes: true
 
-  build-studio-exe:
+  build-cli:
     runs-on: windows-latest
     steps:
       - name: Check out
@@ -49,12 +52,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build ttacode-studio.exe
+      - name: Build ttacode-cli.exe (headless CLI)
         shell: powershell
-        run: .\build\build-studio.ps1
+        run: .\build\build-exe.ps1
 
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ttacode-studio.exe
+          files: dist/ttacode-cli.exe
           generate_release_notes: true

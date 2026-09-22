@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    One-shot build of the TTACode headless CLI into dist\ttacode.exe.
+    One-shot build of the TTACode headless CLI into dist\ttacode-cli.exe.
 
 .DESCRIPTION
     Checks for Python 3.10+, creates a disposable build venv
@@ -57,8 +57,8 @@ Write-Host "Running PyInstaller (this takes a few minutes) ..."
 & $VenvPy -m PyInstaller ttacode.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { Fail "PyInstaller build failed." }
 
-$Exe = Join-Path $Root "dist\ttacode.exe"
-if (-not (Test-Path $Exe)) { Fail "Build finished but dist\ttacode.exe is missing." }
+$Exe = Join-Path $Root "dist\ttacode-cli.exe"
+if (-not (Test-Path $Exe)) { Fail "Build finished but dist\ttacode-cli.exe is missing." }
 $sizeMb = [math]::Round((Get-Item $Exe).Length / 1MB, 1)
 Write-Host ""
 Write-Host "Built: $Exe ($sizeMb MB)" -ForegroundColor Green
@@ -66,11 +66,11 @@ Write-Host "Built: $Exe ($sizeMb MB)" -ForegroundColor Green
 # --- smoke test ------------------------------------------------------------
 Write-Host "Smoke-testing the binary ..."
 & $Exe --help | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "ttacode.exe --help failed." }
+if ($LASTEXITCODE -ne 0) { Fail "ttacode-cli.exe --help failed." }
 & $Exe models list
-if ($LASTEXITCODE -ne 0) { Fail "ttacode.exe models list failed." }
+if ($LASTEXITCODE -ne 0) { Fail "ttacode-cli.exe models list failed." }
 
 Write-Host ""
-Write-Host "OK - dist\ttacode.exe is ready." -ForegroundColor Green
-Write-Host "Next: ttacode.exe init   (first-run model scan + config)"
-Write-Host "Then: ttacode.exe run --headless `"your task`""
+Write-Host "OK - dist\ttacode-cli.exe is ready." -ForegroundColor Green
+Write-Host "Next: ttacode-cli.exe models list   (or: ttacode-cli.exe chat)"
+Write-Host "Then: ttacode-cli.exe run --headless `"your task`""

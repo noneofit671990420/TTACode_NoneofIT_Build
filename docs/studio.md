@@ -14,6 +14,11 @@ pip install PySide6==6.8.3        # or: pip install -r requirements-desktop.txt
 python -m harness ui
 ```
 
+**As a download** (Windows): the Studio is no longer shipped as a
+release asset — the downloadable desktop app is now the chat GUI
+**`ttacode.exe`** (see below). From source you can still run the Studio
+with `python -m harness ui`. The old instructions said:
+
 **As a download** (Windows): grab **`ttacode-studio.exe`** from the
 [Releases page](https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases).
 

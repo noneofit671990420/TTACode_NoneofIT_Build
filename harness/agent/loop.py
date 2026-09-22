@@ -271,19 +271,27 @@ class AgentLoop:
         ]
         return self._turn()
 
-    def chat_turn(self, prompt: str) -> dict:
+    def chat_turn(self, prompt: str, images: list[str] | None = None) -> dict:
         """One interactive turn, keeping conversation history across turns.
 
-        A failed turn (``stopped_reason == "transport_error"``) is rolled
-        back out of the history so the user can retry the same prompt
-        cleanly.
+        ``images`` is an optional list of base64-encoded image payloads;
+        they are attached to the user message via Ollama's ``/api/chat``
+        ``images`` field, which needs a vision-capable model — the
+        transport passes messages through verbatim.
+
+        A failed turn (``stopped_reason == "transport_error"``) or an
+        interrupted turn (``KeyboardInterrupt``) is rolled back out of
+        the history so the user can retry the same prompt cleanly.
         """
         if not self.messages:
             self.messages = [
                 {"role": "system", "content": self.build_system_prompt()}
             ]
         snapshot = len(self.messages)
-        self.messages.append({"role": "user", "content": prompt})
+        user_message: dict = {"role": "user", "content": prompt}
+        if images:
+            user_message["images"] = list(images)
+        self.messages.append(user_message)
         try:
             result = self._turn()
         except KeyboardInterrupt:

@@ -14,7 +14,7 @@ import unittest
 from argparse import Namespace
 from unittest.mock import patch
 
-from harness.cli import build_parser, cmd_chat, cmd_ui
+from harness.cli import build_parser, cmd_chat, cmd_gui, cmd_ui
 
 
 class ChatCommandTests(unittest.TestCase):
@@ -37,18 +37,33 @@ class ChatCommandTests(unittest.TestCase):
         self.assertIn("ttacode chat", err.getvalue())
 
 
+    def test_parser_wires_gui_subcommand(self):
+        args = build_parser().parse_args(["gui"])
+        self.assertIs(args.func, cmd_gui)
+
+    def test_frozen_gui_points_at_ttacode_exe(self):
+        with patch.object(sys, "frozen", True, create=True):
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = cmd_gui(Namespace())
+        self.assertEqual(rc, 2)
+        self.assertIn("ttacode.exe", err.getvalue())
+        self.assertNotIn("ttacode-studio.exe", err.getvalue())
+
+
 class UiCommandTests(unittest.TestCase):
     def test_parser_wires_ui_subcommand(self):
         args = build_parser().parse_args(["ui"])
         self.assertIs(args.func, cmd_ui)
 
-    def test_frozen_points_at_studio_exe(self):
+    def test_frozen_points_at_ttacode_exe(self):
         with patch.object(sys, "frozen", True, create=True):
             err = io.StringIO()
             with patch("sys.stderr", err):
                 rc = cmd_ui(Namespace())
         self.assertEqual(rc, 2)
-        self.assertIn("ttacode-studio.exe", err.getvalue())
+        self.assertIn("ttacode.exe", err.getvalue())
+        self.assertNotIn("ttacode-studio.exe", err.getvalue())
 
     def test_missing_qt_mentions_pyside6(self):
         sys.modules["studio"] = None  # makes `import studio` raise ImportError

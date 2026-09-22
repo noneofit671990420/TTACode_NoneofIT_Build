@@ -5,14 +5,14 @@ and attached to the same GitHub Release.
 
 | App | File | What it is |
 |---|---|---|
-| Headless harness CLI | `ttacode.exe` | Terminal agent: `init`, `run --headless`, `models`, `mcp`, `skills`, `ui` |
-| Studio desktop UI | `ttacode-studio.exe` | Qt conversation-and-agent workspace (needs no Python install) |
+| Desktop chat GUI | `ttacode.exe` | Double-click chat app: type, drop in images, the agent runs tools for you (needs no Python install) |
+| Headless harness CLI | `ttacode-cli.exe` | Terminal agent for power users: `run --headless`, `chat`, `models`, `mcp`, `skills` |
 
 **Stable shareable links** (always the newest release's files — use these
 when linking the builds for others):
 
 - `https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases/latest/download/ttacode.exe`
-- `https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases/latest/download/ttacode-studio.exe`
+- `https://github.com/noneofit671990420/TTACode_NoneofIT_Build/releases/latest/download/ttacode-cli.exe`
 
 The CI workflow (`.github/workflows/build-exe.yml`) uploads the assets
 under exactly these names on every `v*` tag, so the links stay valid
@@ -55,7 +55,7 @@ Two ways to get the harness CLI. Both end at the same CLI.
 
 ### SmartScreen / "unknown publisher" note
 
-`ttacode.exe` and `ttacode-studio.exe` are **unsigned preview builds** — the same posture as the
+`ttacode.exe` and `ttacode-cli.exe` are **unsigned preview builds** — the same posture as the
 upstream TalkToAi Code preview releases. Windows SmartScreen will likely
 show a warning on first run ("Windows protected your PC"). Click *More
 info → Run anyway* if you trust the build. The binary is produced by
@@ -86,8 +86,10 @@ No third-party packages are needed — the harness core is stdlib-only.
 - `harness skills list` — discovered skills (`~/.ttacode/skills`, `./skills`).
 - `harness run --headless "..."` — the real agent loop.
 - `harness ui` — launch the Qt Studio desktop UI from source (needs
-  `pip install PySide6==6.8.3`); the frozen `ttacode.exe` points at
-  `ttacode-studio.exe` instead. See [studio](studio.md).
+  `pip install PySide6==6.8.3`); frozen console builds point at the
+  `ttacode.exe` GUI instead. See [studio](studio.md).
+- `harness gui` — launch the desktop chat GUI from source (needs
+  `pip install PySide6==6.8.3`); this is what `ttacode.exe` ships as.
 
 Config reference: `~/.ttacode/config.json` (all tunables documented in
 [performance](performance.md)); MCP servers: `~/.ttacode/mcp.json`
