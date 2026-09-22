@@ -20,7 +20,7 @@ function Fail($msg) {
 # --- repo root -----------------------------------------------------------
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
-if (-not (Test-Path "ttacode.spec")) { Fail "ttacode.spec not found — run from the repo root." }
+if (-not (Test-Path "ttacode.spec")) { Fail "ttacode.spec not found - run from the repo root." }
 
 # --- Python 3.10+ ---------------------------------------------------------
 $Py = $null
@@ -40,20 +40,20 @@ Write-Host "Using Python $verOut ($Py)"
 $Venv = Join-Path $Root ".build-venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 if (-not (Test-Path $VenvPy)) {
-    Write-Host "Creating build venv at .build-venv …"
+    Write-Host "Creating build venv at .build-venv ..."
     & $Py -m venv $Venv
     if (-not (Test-Path $VenvPy)) { Fail "venv creation failed." }
 } else {
     Write-Host "Reusing existing .build-venv."
 }
 
-Write-Host "Installing PyInstaller into the build venv …"
+Write-Host "Installing PyInstaller into the build venv ..."
 & $VenvPy -m pip install --quiet --upgrade pip
 & $VenvPy -m pip install --quiet pyinstaller
 if ($LASTEXITCODE -ne 0) { Fail "pip install pyinstaller failed." }
 
 # --- build ----------------------------------------------------------------
-Write-Host "Running PyInstaller (this takes a few minutes) …"
+Write-Host "Running PyInstaller (this takes a few minutes) ..."
 & $VenvPy -m PyInstaller ttacode.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { Fail "PyInstaller build failed." }
 
@@ -64,13 +64,13 @@ Write-Host ""
 Write-Host "Built: $Exe ($sizeMb MB)" -ForegroundColor Green
 
 # --- smoke test ------------------------------------------------------------
-Write-Host "Smoke-testing the binary …"
+Write-Host "Smoke-testing the binary ..."
 & $Exe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "ttacode.exe --help failed." }
 & $Exe models list
 if ($LASTEXITCODE -ne 0) { Fail "ttacode.exe models list failed." }
 
 Write-Host ""
-Write-Host "OK — dist\ttacode.exe is ready." -ForegroundColor Green
+Write-Host "OK - dist\ttacode.exe is ready." -ForegroundColor Green
 Write-Host "Next: ttacode.exe init   (first-run model scan + config)"
 Write-Host "Then: ttacode.exe run --headless `"your task`""
