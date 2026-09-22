@@ -10,6 +10,8 @@ Subcommands:
 * ``mcp list``        list configured MCP servers (live status + tools)
 * ``mcp check``       test each MCP server (initialize + tools/list)
 * ``skills list``     list discovered skills
+* ``ui``              launch the Qt Studio desktop UI (source: needs
+                      PySide6; frozen ttacode.exe points at ttacode-studio.exe)
 
 Config lives at ``~/.ttacode/config.json``
 (``%USERPROFILE%\\.ttacode\\config.json`` on Windows).
@@ -402,6 +404,39 @@ def cmd_skills_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Launch the Qt Studio desktop UI.
+
+    From source (``python -m harness ui``) this imports the repo-root
+    ``studio`` module and runs its ``__main__`` block. The frozen
+    ``ttacode(.exe)`` console build does not bundle Qt, so it points at
+    the separate ``ttacode-studio.exe`` release asset instead.
+    """
+    if getattr(sys, "frozen", False):
+        print(
+            "The Studio UI is not bundled into ttacode(.exe) — it ships "
+            "separately as ttacode-studio.exe:\n"
+            "https://github.com/noneofit671990420/TTACode_NoneofIT_Build"
+            "/releases/latest/download/ttacode-studio.exe",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        import studio  # noqa: F401  (repo-root module; needs Qt)
+    except ImportError:
+        print(
+            "The Studio UI needs Qt, which is not installed here.\n"
+            "Install it with:  pip install PySide6==6.8.3\n"
+            "(or: pip install -r requirements-desktop.txt), then re-run "
+            "`harness ui`.",
+            file=sys.stderr,
+        )
+        return 1
+    import runpy
+    runpy.run_module("studio", run_name="__main__")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # The PyInstaller binary is named ttacode(.exe); python -m stays "harness".
     prog = "ttacode" if Path(sys.argv[0]).stem == "ttacode" else "harness"
@@ -449,6 +484,12 @@ def build_parser() -> argparse.ArgumentParser:
     ssub = p_skills.add_subparsers(dest="skills_command", required=True)
     p_skills_list = ssub.add_parser("list", help="List discovered skills.")
     p_skills_list.set_defaults(func=cmd_skills_list)
+
+    p_ui = sub.add_parser(
+        "ui",
+        help="Launch the Qt Studio desktop UI (needs PySide6; frozen builds point at ttacode-studio.exe).",
+    )
+    p_ui.set_defaults(func=cmd_ui)
 
     return parser
 

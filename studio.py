@@ -22,6 +22,7 @@ from routing import choose_route, ensure_local_model
 from ssh_tools import SSHProfile, SSHSession, load_profiles, save_profiles
 from providers import ProviderProfile, load_profiles as load_provider_profiles, save_profiles as save_provider_profiles
 from desktop_inventory import inspect_desktop
+from harness.ui_bridge import prepare_local_model, servable_model_choices, harness_default_model
 
 SOURCE = Path(__file__).resolve().parent
 HOME = Path(os.environ.get('TALKTOAI_CODE_HOME', str(Path(sys.executable).parent if getattr(sys, 'frozen', False) else SOURCE)))
@@ -435,6 +436,14 @@ class Studio(QMainWindow):
             self.task['changes']+=tools.changes; self.persist(); self.refresh_changes(); self.status.setText('File saved · checkpoint created')
         except Exception as exc:self.error(exc)
 
+    def harness_config(self):
+        """Harness config (~/.ttacode/config.json) for model load/tuning; {} when absent."""
+        try:
+            from harness.cli import load_config
+            return load_config()
+        except Exception:
+            return {}
+
     def send(self):
         text=self.prompt.toPlainText().strip()
         if not text:return
@@ -477,7 +486,7 @@ class Studio(QMainWindow):
                     set_active_provider(None)
                     if preference in ('local','local_large'):
                         requested_model=self.config['local_model'] if preference=='local' else self.config.get('local_large_model', self.config['local_model'])
-                        ensure_local_model(requested_model, self.bus.event.emit)
+                        prepare_local_model(requested_model, self.harness_config(), self.bus.event.emit)
                     selected=choose_route(self.config,preference,benchmarks)
                 if self.cancel.is_set():return
                 self.bus.event.emit('route',selected)
@@ -844,11 +853,13 @@ The compact model is intentionally kept as the weak-CPU fallback. TalkToAi Code 
     def select_installed_model(self):
         if self.busy:return
         try:
-            from routing import inventory
-            names=inventory(11434)
-            if not names:raise ValueError('No local models available.')
-            name,ok=QInputDialog.getItem(self,'Installed local model','Choose a downloaded model:',names,editable=False)
+            choices=servable_model_choices(self.harness_config())
+            if not choices:raise ValueError('No Ollama-servable models found on this PC. Pull one with `ollama pull <name>` (or import an LM Studio file with `ollama create`), then try again.')
+            fit_word={'✓':'fits VRAM','!':'exceeds VRAM budget','?':'size unknown'}
+            labels=[f"{c['name']} — {c['size_str']} · {fit_word.get(c['fit'],c['fit'])}" for c in choices]
+            label,ok=QInputDialog.getItem(self,'Installed local model','Choose a model (only models Ollama can serve are listed):',labels,editable=False)
             if ok:
+                name=choices[labels.index(label)]['name']
                 self.config['local_model']=name;(HOME/'config.json').write_text(json.dumps(self.config,indent=2),encoding='utf-8');self.route.setCurrentIndex(1);self.health()
         except Exception as exc:self.error(exc)
 
@@ -910,6 +921,9 @@ The compact model is intentionally kept as the weak-CPU fallback. TalkToAi Code 
 if __name__=='__main__':
     import multiprocessing
     multiprocessing.freeze_support()
+    if '--version' in sys.argv:
+        print('TalkToAi Code Studio')
+        sys.exit(0)
     if '--self-test' in sys.argv:
         from release_checks import smoke
         sys.exit(0 if smoke(HOME/'packaged-release-check.json') else 1)
