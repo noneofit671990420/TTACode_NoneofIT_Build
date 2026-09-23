@@ -1,0 +1,35 @@
+{
+  "_gatekeeper_ai_alt": "use {\"ai\": \"lucy\"} to let the local AI rule on tasks instead of the human",
+  "_note": "Copy to config.json and fill in. psk + ntfy topics must match on every peer. NEVER commit config.json.",
+  "allowed_commands": [
+    "python",
+    "python3"
+  ],
+  "direct_port": 17431,
+  "gatekeeper": "human",
+  "max_runtime_s": 120,
+  "name": "desk",
+  "ntfy_base": "https://ntfy.sh",
+  "ntfy_inbox": "<secret>-inbox   (this host publishes here)",
+  "ntfy_outbox": "<secret>-outbox  (this host subscribes here)",
+  "party_bots": [
+    {
+      "adapter": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3:8b",
+      "name": "lucy",
+      "system": "You are Lucy, a warm, sharp local AI. You are at a party of AIs chatting over text. Be brief and real."
+    },
+    {
+      "_example": "llama-server via the OpenAI-compatible adapter",
+      "adapter": "openai-compat",
+      "base_url": "http://127.0.0.1:8080",
+      "model": "<gguf model name>",
+      "name": "gguf-brain"
+    }
+  ],
+  "psk": "<64 hex chars: openssl rand -hex 32>",
+  "tls_certfile": "desk.crt",
+  "tls_keyfile": "desk.key",
+  "work_root": "party-work"
+}

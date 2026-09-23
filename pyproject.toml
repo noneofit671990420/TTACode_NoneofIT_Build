@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "museng"
+version = "0.1.0"
+description = "Mus.eng — a safe, tiny party protocol so any local AI can communicate"
+readme = "museng/MUSENG.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+museng-host = "museng.host:main"
+museng-client = "museng.client:main"
+
+[tool.setuptools.packages.find]
+include = ["museng*"]
